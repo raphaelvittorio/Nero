@@ -28,6 +28,29 @@ Aplikasi pribadi untuk mengubah video panjang (dari link atau file) menjadi vide
 
 Centang **Langsung render otomatis** bila ingin semua momen langsung dijadikan video tanpa diperiksa dulu.
 
+### Referensi & instruksi (timeline riset, clip contoh, prompt)
+
+Klik **Referensi & instruksi** di kartu "Masukkan video" (atau **Cari ulang + referensi** pada proyek yang sudah ada) untuk mengarahkan hasil. Tulis satu referensi per baris:
+
+```
+12:30 - 13:45 Kenapa bisnis pertamaku bangkrut?
+1:02:10 - 1:03:00 tips mengatur uang
+45:20 momen lucu
+https://www.tiktok.com/@akun/video/...
+https://youtu.be/IDVIDEO?t=754
+Fokus pada momen tentang "investasi". Judul berupa pertanyaan. Jangan ambil bagian sponsor.
+```
+
+| Baris | Hasilnya |
+|---|---|
+| `mm:ss - mm:ss` atau `j:mm:ss - j:mm:ss` (boleh `12.30 - 13.45`, `s/d`, `sampai`) | **Timeline riset**: pasti dijadikan clip dengan waktu itu (dirapikan ke awal/akhir kalimat bila selisihnya ≤ 2 detik). Teks setelah waktu menjadi judul (mode lokal) atau catatan untuk AI. |
+| `mm:ss catatan` | **Titik waktu**: dibuatkan clip yang dimulai sedikit sebelum titik itu. |
+| Link clip pendek orang lain (TikTok/Reels/Shorts) | **Clip referensi**: audionya diunduh dan ditranskrip, lalu dicari bagian yang sama di video Anda. Bila ketemu, bagian itu dijadikan clip. Bila tidak ada (clip dari video lain), dipakai sebagai contoh gaya/topik. Maksimal 5 link, masing-masing maks 15 menit. |
+| Link YouTube video ini dengan `?t=` | Dianggap titik waktu. |
+| Teks lain | **Instruksi/prompt**. Dengan Claude API key, instruksi dibaca AI apa adanya (topik, gaya judul, bahasa caption, dll). Tanpa API key, kata-katanya dipakai sebagai kata kunci topik: `"frasa dalam kutip"` dicocokkan utuh, dan kata setelah *jangan/hindari/tanpa* diberi skor minus. |
+
+Di bawah kolom muncul daftar **Dikenali** supaya Anda bisa memastikan setiap baris terbaca dengan benar. **Jumlah clip** adalah total: timeline dan titik Anda selalu masuk, sisanya diisi momen pilihan otomatis. Bila hanya ingin clip dari riset Anda, isi Jumlah clip sama dengan banyaknya timeline. Clip dari referensi diberi tanda **Timeline Anda**, **Titik riset Anda**, atau **Sama dengan clip referensi**.
+
 Setelah semua clip selesai, tekan **🧹 Hapus video sumber** untuk menghemat disk (video asli bisa ratusan MB). Hasil render tetap aman, tetapi clip proyek itu tidak bisa dirender ulang.
 
 ## Fitur

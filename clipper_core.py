@@ -148,6 +148,40 @@ def download_video(url: str, out_dir: str, progress=None, cookies_browser: str |
     }
 
 
+REF_MAX_SECONDS = 900  # clip referensi lebih dari 15 menit hampir pasti salah tempel (video penuh)
+
+
+def download_reference(url: str, out_dir: str, cookies_browser: str | None = None,
+                       max_seconds: int = REF_MAX_SECONDS) -> dict:
+    """Unduh audio clip referensi saja (cukup untuk transkrip & pencocokan, jauh lebih cepat)."""
+    import yt_dlp
+    from yt_dlp.utils import match_filter_func
+
+    os.makedirs(out_dir, exist_ok=True)
+    opts = {
+        "outtmpl": os.path.join(out_dir, "ref.%(ext)s"),
+        "format": "ba/b",
+        "ffmpeg_location": os.path.dirname(ffmpeg_exe()),
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 3,
+        "match_filter": match_filter_func(f"duration <=? {max_seconds}"),
+    }
+    if cookies_browser:
+        opts["cookiesfrombrowser"] = (cookies_browser,)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True) or {}
+    files = [f for f in os.listdir(out_dir) if f.startswith("ref.") and not f.endswith((".part", ".ytdl"))]
+    if not files:
+        dur = info.get("duration") or 0
+        if dur > max_seconds:
+            raise RuntimeError(f"terlalu panjang ({dur / 60:.0f} menit), bukan clip pendek")
+        raise RuntimeError("tidak bisa diunduh")
+    return {"path": os.path.join(out_dir, files[0]), "title": info.get("title") or url,
+            "duration": info.get("duration") or 0}
+
+
 # --------------------------------------------------------------------------
 # 2. Audio
 # --------------------------------------------------------------------------
@@ -348,61 +382,245 @@ def _hashtags(text: str, n: int = 5) -> list[str]:
     return ["#" + w for w in top] + ["#fyp", "#viral"]
 
 
-def find_highlights_heuristic(segments, energy, n_clips=5, min_len=20, max_len=60) -> list[dict]:
-    if not segments:
-        return []
+# --------------------------------------------------------------------------
+# Referensi dari pengguna: timeline hasil riset, titik waktu, link clip referensi, instruksi
+# --------------------------------------------------------------------------
+_TS = r"\d{1,3}(?::\d{1,2}){1,2}(?:\.\d+)?"      # 12:30, 1:02:30, 12:30.5
+_TS_DOT = r"\d{1,3}\.\d{2}(?:\.\d{2})?"          # 12.30 (gaya penulisan jam di Indonesia), hanya untuk rentang
+_SEP = r"\s*(?:-|–|—|~|→|->|to|sampai|hingga|s/d|sd)\s*"
+_RANGE_RE = re.compile(rf"(?<![\d:.])(?:({_TS}){_SEP}({_TS})|({_TS_DOT}){_SEP}({_TS_DOT}))(?![\d:])", re.I)
+_POINT_RE = re.compile(rf"^(?:[-*•>]|\d{{1,2}}[.)])?\s*(?:(?:clip|klip|momen|part|bagian)\s*\d*\s*[:.)\-]?\s*)?"
+                       rf"[\[(]?({_TS})(?![\d:])[\])]?", re.I)
+_URL_RE = re.compile(r"https?://[^\s<>\"']+")
+_NEGATIVE = re.compile(r"\b(jangan|hindari|tanpa|kecuali|bukan|skip|lewati|avoid|except|don'?t|no)\b", re.I)
+BRIEF_STOP = set("""
+cari carikan buat buatkan bikin bikinin momen moment momennya clip klip clipnya video bagian tentang soal
+fokus utamakan gaya judul hook caption durasi detik menit tolong mohon pilih pilihkan ambil ambilkan tampilkan
+terutama khususnya kira sekitar contoh misalnya sesuai referensi timeline yang find make focus about style
+""".split())
+
+
+def parse_ts(v: str) -> float:
+    """'12:30' -> 750, '1:02:30' -> 3750, '12.30' -> 750 (penulisan jam gaya Indonesia)."""
+    v = v.strip()
+    parts = v.split(":") if ":" in v else v.split(".")
+    secs = 0.0
+    for p in parts:
+        secs = secs * 60 + float(p)
+    return secs
+
+
+def _clean_note(t: str) -> str:
+    return re.sub(r"^[\s\-–—:|•*>.,)\]]+|[\s\-–—:|•*>,(\[]+$", "", t).strip()
+
+
+def parse_brief(text: str) -> dict:
+    """Pisahkan isi kolom referensi menjadi:
+    ranges (timeline mulai-selesai), points (satu titik waktu), links (clip referensi), instructions (teks bebas)."""
+    ranges, points, links, rest = [], [], [], []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        urls = _URL_RE.findall(line)
+        if urls:
+            links += [u.rstrip(".,;)]") for u in urls]
+            continue
+        m = _RANGE_RE.search(line)
+        if m:
+            a, b = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+            note = _clean_note(line[m.end():]) or _clean_note(line[:m.start()])
+            ranges.append({"start": parse_ts(a), "end": parse_ts(b), "note": note[:200]})
+            continue
+        m = _POINT_RE.match(line)
+        if m:
+            points.append({"t": parse_ts(m.group(1)), "note": _clean_note(line[m.end():])[:200]})
+            continue
+        rest.append(line)
+    return {"ranges": ranges, "points": points, "links": list(dict.fromkeys(links)),
+            "instructions": "\n".join(rest)[:4000]}
+
+
+def brief_keywords(text: str, n: int = 12) -> tuple[list[str], list[str]]:
+    """Kata kunci dari instruksi bebas: (dicari, dihindari). "Frasa dalam kutip" dicocokkan utuh.
+    Klausa yang mengandung 'jangan/hindari/tanpa...' masuk daftar yang dihindari."""
+    want, avoid = [], []
+    for clause in re.split(r"[\n.;,]+", text or ""):
+        bucket = avoid if _NEGATIVE.search(clause) else want
+        bucket += [q.lower().strip() for q in re.findall(r"[\"“”']([^\"“”']{3,80})[\"“”']", clause)]
+        rest = re.sub(r"[\"“”'][^\"“”']*[\"“”']", " ", clause)
+        bucket += [w for w in re.findall(r"[A-Za-zÀ-ÿ]{4,}", rest.lower())
+                   if w not in STOPWORDS and w not in FILLER and w not in BRIEF_STOP and not _NEGATIVE.fullmatch(w)]
+    return list(dict.fromkeys(want))[:n], list(dict.fromkeys(avoid))[:n]
+
+
+def snap_range(segments, start: float, end: float, tol: float = 2.0) -> tuple[float, float]:
+    """Rapikan ke awal/akhir kalimat terdekat bila jaraknya dekat (timeline riset biasanya dibulatkan)."""
+    if segments:
+        s = min(segments, key=lambda x: abs(x["start"] - start))
+        if abs(s["start"] - start) <= tol:
+            start = s["start"]
+        e = min(segments, key=lambda x: abs(x["end"] - end))
+        if abs(e["end"] - end) <= tol and e["end"] > start:
+            end = e["end"]
+    return round(start, 2), round(end, 2)
+
+
+def _text_between(segments, start, end) -> str:
+    return " ".join(s["text"] for s in segments if s["end"] > start + 0.1 and s["start"] < end - 0.1)
+
+
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[0-9a-zà-ÿ]+", text.lower())
+
+
+def match_reference(segments, ref_segments, min_ratio: float = 0.35, n: int = 3) -> dict | None:
+    """Cari bagian video panjang yang ucapannya sama dengan clip referensi (mis. clip orang lain
+    dari podcast yang sama). Dicocokkan per 3 kata berurutan, jadi tahan terhadap salah dengar transkrip.
+    Hasil: {start, end, ratio} atau None bila tidak ketemu."""
+    words = [w for s in segments for w in s.get("words", [])]
+    toks = [(t, wi) for wi, w in enumerate(words) for t in _tokens(w["word"])]
+    ref = [t for s in ref_segments for t in _tokens(s["text"])]
+    if len(ref) < n + 3 or len(toks) < n:
+        return None
+    index: dict[tuple, list[int]] = {}
+    for k in range(len(toks) - n + 1):
+        index.setdefault(tuple(t for t, _ in toks[k:k + n]), []).append(k)
+    hits = sorted((k, j) for j in range(len(ref) - n + 1) for k in index.get(tuple(ref[j:j + n]), ()))
+    if not hits:
+        return None
+    # jendela terpadat: paling banyak potongan referensi berbeda yang cocok dalam rentang sepanjang clip
+    span = int(len(ref) * 1.6) + 10
+    cnt: dict[int, int] = {}
+    lo, best = 0, (0, 0, 0)
+    for hi, (k, j) in enumerate(hits):
+        cnt[j] = cnt.get(j, 0) + 1
+        while k - hits[lo][0] > span:
+            jj = hits[lo][1]
+            cnt[jj] -= 1
+            if not cnt[jj]:
+                del cnt[jj]
+            lo += 1
+        if len(cnt) > best[0]:
+            best = (len(cnt), lo, hi)
+    found, lo, hi = best
+    ratio = found / (len(ref) - n + 1)
+    if ratio < min_ratio:
+        return None
+    # buang kecocokan nyasar (frasa umum di tempat lain) yang tidak segaris dengan mayoritas
+    win = hits[lo:hi + 1]
+    mid = float(np.median([k - j for k, j in win]))
+    win = [(k, j) for k, j in win if abs(k - j - mid) <= 0.15 * len(ref) + 5]
+    k0, k1 = min(k for k, _ in win), max(k for k, _ in win) + n - 1
+    j0, j1 = min(j for _, j in win), max(j for _, j in win) + n - 1
+    # kata awal/akhir referensi yang tidak cocok tetap dihitung, supaya clip tidak terpotong
+    k0, k1 = max(0, k0 - j0), min(len(toks) - 1, k1 + (len(ref) - 1 - j1))
+    return {"start": words[toks[k0][1]]["start"], "end": words[toks[k1][1]]["end"], "ratio": round(ratio, 2)}
+
+
+def _local_meta(segments, start, end, note="") -> dict:
+    """Judul, caption & hashtag tanpa AI untuk rentang waktu tertentu."""
+    text = _text_between(segments, start, end)
+    first = next((s["text"] for s in segments if s["end"] > start + 0.1), text)
+    title = note[:90] if note else _make_title(first if len(first.split()) >= 4 else text or "Clip")
+    return {"title": title, "caption": _make_title(text, 16) if text else title,
+            "hashtags": _hashtags(text), "text": text}
+
+
+def _overlaps(a0, a1, b0, b1, slack=1.0) -> bool:
+    return not (a1 <= b0 + slack or a0 >= b1 - slack)
+
+
+def find_highlights_heuristic(segments, energy, n_clips=5, min_len=20, max_len=60, keywords=(), avoid=(),
+                              points=(), fixed=(), taken=()) -> list[dict]:
+    """Pilih momen tanpa AI.
+    fixed  : rentang wajib dari pengguna [{start, end, note, ref}] -> selalu ikut dalam hasil
+    points : titik waktu wajib [{t, note}] -> dipilih momen terbaik yang mencakup titik itu
+    taken  : rentang yang sudah dipakai (tidak ikut hasil, hanya dihindari)
+    n_clips: jumlah momen otomatis tambahan; keywords/avoid menaikkan/menurunkan skor."""
     hop = 0.5
     e_mean, e_std = float(np.mean(energy)), float(np.std(energy) + 1e-6)
+    keywords, avoid = [k.lower() for k in keywords], [k.lower() for k in avoid]
+
+    def score_of(i, j):
+        start, end = segments[i]["start"], segments[j]["end"]
+        dur = max(0.5, end - start)
+        text = " ".join(s["text"] for s in segments[i:j + 1])
+        words = [w.lower().strip(".,!?\"'") for w in text.split()]
+        nw = max(1, len(words))
+        first = segments[i]["text"].lower()
+
+        hook = sum(1 for k in HOOK_WORDS if k in first) * 1.5
+        hook += 2.0 if "?" in segments[i]["text"] else 0
+        hook += 1.0 if re.search(r"\d", segments[i]["text"]) else 0
+        kw = sum(1 for w in words if w in HOOK_WORDS) / nw * 40
+        rate = nw / dur  # kata per detik
+        rate_score = -abs(rate - 2.8) * 1.2
+        filler = sum(1 for w in words if w in FILLER) / nw * -15
+        a, b = int(start / hop), max(int(start / hop) + 1, int(end / hop))
+        ew = energy[a:b] if a < len(energy) else energy[-1:]
+        loud = (float(np.mean(ew)) - e_mean) / e_std * 1.5
+        peaks = float(np.mean(ew > e_mean + e_std)) * 3
+        silent = float(np.mean(ew < e_mean - 1.5 * e_std)) * -4
+        excl = text.count("!") * 0.5 + text.count("?") * 0.4
+        clean = 1.5 if segments[j]["text"].rstrip().endswith((".", "!", "?")) else -1.0
+        length_pref = -abs(dur - (min_len + max_len) / 2) / max_len
+        low = text.lower()
+        topic = sum(3.0 for k in keywords if k in low) + (1.5 if any(k in first for k in keywords) else 0)
+        topic -= sum(4.0 for k in avoid if k in low)
+
+        score = hook + kw + rate_score + filler + loud + peaks + silent + excl + clean + length_pref + topic
+        return {"start": start, "end": end, "score": score, "text": text,
+                "first": segments[i]["text"], "topic": topic > 0}
+
     cands = []
     for i in range(len(segments)):
-        start = segments[i]["start"]
-        text_parts, end = [], start
         for j in range(i, len(segments)):
-            seg = segments[j]
-            if seg["end"] - start > max_len:
+            dur = segments[j]["end"] - segments[i]["start"]
+            if dur > max_len:
                 break
-            text_parts.append(seg["text"])
-            end = seg["end"]
-            dur = end - start
-            if dur < min_len:
-                continue
-            ends_clean = seg["text"].rstrip().endswith((".", "!", "?"))
-            text = " ".join(text_parts)
-            words = [w.lower().strip(".,!?\"'") for w in text.split()]
-            nw = max(1, len(words))
-            first = segments[i]["text"].lower()
+            if dur >= min_len:
+                cands.append(score_of(i, j))
+    if not cands and segments:  # video lebih pendek dari durasi minimum
+        cands = [score_of(0, len(segments) - 1)]
 
-            hook = sum(1 for k in HOOK_WORDS if k in first) * 1.5
-            hook += 2.0 if "?" in segments[i]["text"] else 0
-            hook += 1.0 if re.search(r"\d", segments[i]["text"]) else 0
-            kw = sum(1 for w in words if w in HOOK_WORDS) / nw * 40
-            rate = nw / dur  # kata per detik
-            rate_score = -abs(rate - 2.8) * 1.2
-            filler = sum(1 for w in words if w in FILLER) / nw * -15
-            a, b = int(start / hop), max(int(start / hop) + 1, int(end / hop))
-            ew = energy[a:b] if a < len(energy) else energy[-1:]
-            loud = (float(np.mean(ew)) - e_mean) / e_std * 1.5
-            peaks = float(np.mean(ew > e_mean + e_std)) * 3
-            silent = float(np.mean(ew < e_mean - 1.5 * e_std)) * -4
-            excl = text.count("!") * 0.5 + text.count("?") * 0.4
-            clean = 1.5 if ends_clean else -1.0
-            length_pref = -abs(dur - (min_len + max_len) / 2) / max_len
-
-            score = hook + kw + rate_score + filler + loud + peaks + silent + excl + clean + length_pref
-            cands.append({"start": start, "end": end, "score": score, "text": text,
-                          "first": segments[i]["text"], "j": j})
-    if not cands:  # video lebih pendek dari durasi minimum
-        text = " ".join(s["text"] for s in segments)
-        cands = [{"start": segments[0]["start"], "end": segments[-1]["end"], "score": 1.0,
-                  "text": text, "first": segments[0]["text"]}]
-
-    cands.sort(key=lambda c: -c["score"])
+    blocked = [tuple(x) for x in taken] + [(f["start"], f["end"]) for f in fixed]
+    free = lambda a, b: all(not _overlaps(a, b, x, y) for x, y in blocked)  # noqa: E731
     chosen = []
-    for c in cands:
-        if all(c["end"] <= o["start"] + 1 or c["start"] >= o["end"] - 1 for o in chosen):
-            chosen.append(c)
-        if len(chosen) >= n_clips:
+
+    for f in fixed:  # timeline pengguna: skornya tetap dihitung supaya bisa dibandingkan
+        idx = [k for k, s in enumerate(segments) if s["end"] > f["start"] + 0.1 and s["start"] < f["end"] - 0.1]
+        c = score_of(idx[0], idx[-1]) if idx else {"score": 0.0, "text": "", "first": "", "topic": False}
+        chosen.append({**c, "start": f["start"], "end": f["end"], "ref": f.get("ref", "timeline"),
+                       "note": f.get("note", ""), "ratio": f.get("ratio")})
+
+    for pt in points:  # titik waktu: momen terbaik yang dimulai sedikit sebelum titik itu
+        t = pt["t"]
+        opts = [c for c in cands if t - min(15, max_len * 0.3) <= c["start"] <= t + 1 and c["end"] >= t + 4
+                and free(c["start"], c["end"])]
+        if opts:
+            c = max(opts, key=lambda x: x["score"])
+        elif segments:
+            i = max([k for k, s in enumerate(segments) if s["start"] <= t + 1] or [0])
+            j = i
+            while j + 1 < len(segments) and segments[j]["end"] - segments[i]["start"] < (min_len + max_len) / 2:
+                j += 1
+            c = score_of(i, j)
+        else:
+            continue
+        chosen.append({**c, "ref": "titik", "t": t, "note": pt.get("note", "")})
+        blocked.append((c["start"], c["end"]))
+
+    n_auto = 0
+    for c in sorted(cands, key=lambda x: -x["score"]):
+        if n_auto >= n_clips:
             break
+        if free(c["start"], c["end"]):
+            chosen.append(c)
+            blocked.append((c["start"], c["end"]))
+            n_auto += 1
+    if not chosen:
+        return []
 
     scores = [c["score"] for c in chosen]
     lo, hi = min(scores), max(scores)
@@ -410,23 +628,28 @@ def find_highlights_heuristic(segments, energy, n_clips=5, min_len=20, max_len=6
     for c in chosen:
         norm = 0.5 if hi == lo else (c["score"] - lo) / (hi - lo)
         viral = int(round(55 + norm * 40))
-        reasons = []
-        if "?" in c["first"]:
-            reasons.append("dibuka dengan pertanyaan")
-        if any(k in c["first"].lower() for k in HOOK_WORDS):
-            reasons.append("kalimat pembuka kuat")
-        if "!" in c["text"]:
-            reasons.append("emosi/penekanan tinggi")
-        if not reasons:
-            reasons.append("bicara padat dan jelas")
-        out.append({
-            "start": round(c["start"], 2), "end": round(c["end"], 2),
-            "title": _make_title(c["first"] if len(c["first"].split()) >= 4 else c["text"]),
-            "score": viral, "reason": ", ".join(reasons),
-            "caption": _make_title(c["text"], 16),
-            "hashtags": _hashtags(c["text"]),
-            "text": c["text"],
-        })
+        ref, note = c.get("ref"), c.get("note") or ""
+        if ref == "timeline":
+            reasons = ["dari timeline riset Anda"]
+        elif ref == "link":
+            reasons = [f"sama dengan clip referensi ({c.get('ratio') or 0:.0%} kata cocok)"]
+        elif ref == "titik":
+            reasons = [f"mencakup titik {_fmt(c['t'])} dari riset Anda" + (f" ({note})" if note else "")]
+            note = ""  # catatan titik bukan judul
+        else:
+            reasons = []
+            if c.get("topic"):
+                reasons.append("sesuai instruksi/topik Anda")
+            if "?" in c["first"]:
+                reasons.append("dibuka dengan pertanyaan")
+            if any(k in c["first"].lower() for k in HOOK_WORDS):
+                reasons.append("kalimat pembuka kuat")
+            if "!" in c["text"]:
+                reasons.append("emosi/penekanan tinggi")
+            if not reasons:
+                reasons.append("bicara padat dan jelas")
+        out.append({"start": round(c["start"], 2), "end": round(c["end"], 2), "score": viral,
+                    "reason": ", ".join(reasons), "ref": ref, **_local_meta(segments, c["start"], c["end"], note)})
     out.sort(key=lambda c: c["start"])
     return out
 
@@ -447,8 +670,9 @@ CLIP_SCHEMA = {
                     "reason": {"type": "string", "description": "alasan singkat"},
                     "caption": {"type": "string", "description": "caption postingan 1-2 kalimat"},
                     "hashtags": {"type": "array", "items": {"type": "string"}},
+                    "ref": {"type": "integer", "description": "nomor TIMELINE WAJIB yang diisi datanya, 0 untuk clip baru"},
                 },
-                "required": ["start", "end", "title", "score", "reason", "caption", "hashtags"],
+                "required": ["start", "end", "title", "score", "reason", "caption", "hashtags", "ref"],
                 "additionalProperties": False,
             },
         },
@@ -461,12 +685,45 @@ FALLBACK_MODELS = {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "clau
 AI_TRANSCRIPT_LIMIT = 800_000  # karakter (~200 ribu token): cukup untuk video beberapa jam
 
 
+def _brief_prompt(brief: dict) -> str:
+    """Bagian prompt dari kolom 'Referensi & instruksi' milik pengguna."""
+    parts = []
+    instr = (brief.get("instructions") or "").strip()
+    if instr:
+        parts.append("INSTRUKSI DARI PENGGUNA (utamakan saat memilih momen dan menulis judul/caption):\n"
+                     f"<instruksi>\n{instr}\n</instruksi>")
+    examples = brief.get("examples") or []
+    if examples:
+        parts.append("CONTOH CLIP REFERENSI yang disukai pengguna (dari video lain). Cari momen yang jenis, "
+                     "energi, dan gaya hook-nya mirip; isinya tidak harus sama:\n"
+                     + "\n".join(f'Contoh {k}: "{e}"' for k, e in enumerate(examples, 1)))
+    fixed = brief.get("fixed") or []
+    if fixed:
+        parts.append("TIMELINE WAJIB hasil riset pengguna. Semuanya PASTI dijadikan clip dengan waktu ini. "
+                     "Untuk masing-masing, kembalikan satu item berisi title, caption, hashtags, score, reason "
+                     "dengan ref = nomornya (start/end salin dari sini):\n"
+                     + "\n".join(f"#{k} [{f['start']:.1f}-{f['end']:.1f}]"
+                                 + (f" catatan pengguna: {f['note']}" if f.get("note") else "")
+                                 for k, f in enumerate(fixed, 1)))
+    points = brief.get("points") or []
+    if points:
+        parts.append("TITIK WAKTU WAJIB hasil riset pengguna. Setiap titik berikut harus masuk ke salah satu "
+                     "clip BARU (ref = 0) yang dimulai sedikit sebelum titik itu:\n"
+                     + "\n".join(f"- detik {pt['t']:.1f}" + (f" ({pt['note']})" if pt.get("note") else "")
+                                 for pt in points))
+    return "\n\n".join(parts)
+
+
 def find_highlights_ai(segments, api_key, n_clips=5, min_len=20, max_len=60,
-                       model="claude-sonnet-5-5", video_title="") -> tuple[list[dict], str]:
+                       model="claude-sonnet-5-5", video_title="", brief=None) -> tuple[list[dict], str]:
     """Memakai Claude API untuk memilih momen paling 'viral'.
+    n_clips = jumlah clip BARU. brief (opsional): {instructions, examples, fixed, points} dari pengguna;
+    clip 'fixed' selalu dikembalikan dengan waktu persis seperti yang diberikan.
     Hasil: (daftar clip, catatan untuk pengguna atau "")."""
     import anthropic
 
+    brief = brief or {}
+    fixed, points = brief.get("fixed") or [], brief.get("points") or []
     lines, total, cut_at = [], 0, None
     for s in segments:
         line = f"[{s['start']:.1f}-{s['end']:.1f}] {s['text']}"
@@ -476,19 +733,26 @@ def find_highlights_ai(segments, api_key, n_clips=5, min_len=20, max_len=60,
             break
         lines.append(line)
     note = (f"Transkrip sangat panjang: AI hanya membaca sampai menit {cut_at / 60:.0f}." if cut_at else "")
+    extra = _brief_prompt(brief)
+    if n_clips > 0:
+        task = (f"Pilih {n_clips} potongan BARU terbaik (ref = 0) untuk dijadikan video pendek"
+                + (", tidak tumpang tindih dengan TIMELINE WAJIB" if fixed else "") + ".")
+    else:
+        task = "Tidak perlu memilih potongan baru; cukup isi data untuk setiap TIMELINE WAJIB."
     prompt = f"""Kamu adalah editor video pendek (TikTok/Reels/Shorts) yang sangat paham konten viral.
 Berikut transkrip video "{video_title}" dengan waktu dalam detik.
 
 {chr(10).join(lines)}
-
-Pilih {n_clips} potongan terbaik untuk dijadikan video pendek. Aturan:
-- Durasi tiap potongan {min_len}-{max_len} detik, tidak saling tumpang tindih.
+{(chr(10) + extra + chr(10)) if extra else ""}
+{task} Aturan:
+- Durasi tiap potongan baru {min_len}-{max_len} detik, tidak saling tumpang tindih.
 - Mulai tepat di awal kalimat yang langsung menarik perhatian (hook kuat di 3 detik pertama).
 - Akhiri di akhir kalimat/gagasan yang tuntas.
 - Potongan harus bisa dipahami tanpa menonton video aslinya.
 - title: judul hook singkat (maks 8 kata) yang tampil di atas video.
 - caption: caption postingan 1-2 kalimat; hashtags: 3-8 hashtag relevan.
-Gunakan bahasa yang sama dengan bahasa transkrip."""
+- Ikuti instruksi pengguna di atas bila ada, kecuali yang bertentangan dengan format jawaban.
+Gunakan bahasa yang sama dengan bahasa transkrip, kecuali pengguna meminta bahasa lain."""
 
     client = anthropic.Anthropic(api_key=api_key, max_retries=3)
     params = {
@@ -527,27 +791,45 @@ Gunakan bahasa yang sama dengan bahasa transkrip."""
 
     starts = [s["start"] for s in segments]
     ends = [s["end"] for s in segments]
-    out = []
+    fixed_out: dict[int, dict] = {}
+    new = []
     for c in clips:
-        st, en = float(c["start"]), float(c["end"])
-        st = min(starts, key=lambda x: abs(x - st))  # rapikan ke batas kalimat
-        en = min(ends, key=lambda x: abs(x - en))
-        if en - st < 5:
-            continue
         try:
             score = max(0, min(100, int(round(float(c.get("score", 70))))))
         except (TypeError, ValueError):
             score = 70
-        out.append({
-            "start": round(st, 2), "end": round(en, 2),
+        meta = {
             "title": str(c.get("title", ""))[:90],
             "score": score,
             "reason": str(c.get("reason", "")),
             "caption": str(c.get("caption", "")),
             "hashtags": [h if h.startswith("#") else "#" + h
                          for h in (str(x).strip().replace(" ", "") for x in c.get("hashtags", [])) if h][:8],
-            "text": " ".join(s["text"] for s in segments if s["start"] >= st - 0.1 and s["end"] <= en + 0.1),
-        })
+        }
+        try:
+            ref = int(c.get("ref") or 0)
+        except (TypeError, ValueError):
+            ref = 0
+        if 1 <= ref <= len(fixed) and ref not in fixed_out:
+            f = fixed[ref - 1]  # waktu dari pengguna yang dipakai, bukan tebakan AI
+            fixed_out[ref] = {"start": f["start"], "end": f["end"], **meta, "ref": f.get("ref", "timeline"),
+                              "text": _text_between(segments, f["start"], f["end"])}
+            continue
+        st, en = float(c["start"]), float(c["end"])
+        st = min(starts, key=lambda x: abs(x - st))  # rapikan ke batas kalimat
+        en = min(ends, key=lambda x: abs(x - en))
+        if en - st < 5 or any(_overlaps(st, en, f["start"], f["end"], 2.0) for f in fixed):
+            continue
+        covers = any(st - 1 <= pt["t"] <= en for pt in points)
+        new.append({"start": round(st, 2), "end": round(en, 2), **meta, "ref": "titik" if covers else None,
+                    "text": " ".join(s["text"] for s in segments if s["start"] >= st - 0.1 and s["end"] <= en + 0.1)})
+    for k, f in enumerate(fixed, 1):  # AI lupa mengisi salah satu timeline: tetap dibuat
+        if k not in fixed_out:
+            fixed_out[k] = {"start": f["start"], "end": f["end"], "score": 0, "ref": f.get("ref", "timeline"),
+                            "reason": "dari timeline riset Anda",
+                            **_local_meta(segments, f["start"], f["end"], f.get("note", ""))}
+    new.sort(key=lambda c: (c["ref"] != "titik", -c["score"]))
+    out = list(fixed_out.values()) + new[:max(n_clips, len(points))]
     out.sort(key=lambda c: c["start"])
     return out, note
 

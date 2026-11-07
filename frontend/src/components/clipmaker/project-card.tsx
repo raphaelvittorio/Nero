@@ -111,6 +111,11 @@ export function ProjectCard({ p, onReanalyze }: { p: Project; onReanalyze: (pid:
             <span className={cn("size-2 flex-none rounded-full", DOT[p.status])} />
             <span>{p.stage}</span>
             {p.used_ai && <Badge variant="secondary">AI</Badge>}
+            {p.brief && (
+              <Badge variant="outline" className="text-primary" title={p.brief}>
+                Pakai referensi
+              </Badge>
+            )}
           </div>
           {running && <Progress value={(p.progress ?? 0) * 100} className="mt-2" />}
           {p.error && <p className="mt-1.5 text-sm break-words text-destructive">⚠ {p.error}</p>}
@@ -154,8 +159,13 @@ export function ProjectCard({ p, onReanalyze }: { p: Project; onReanalyze: (pid:
                 <Button variant="outline" size="sm" onClick={() => setTranscriptPid(p.id)}>
                   <FileTextIcon /> Transkrip
                 </Button>
-                <Button variant="outline" size="sm" onClick={() => onReanalyze(p.id)}>
-                  <RotateCwIcon /> Cari ulang momen
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onReanalyze(p.id)}
+                  title="Cari ulang momen, bisa dengan timeline riset / link referensi / instruksi"
+                >
+                  <RotateCwIcon /> Cari ulang + referensi
                 </Button>
               </>
             ) : (

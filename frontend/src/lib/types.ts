@@ -20,6 +20,8 @@ export interface Clip {
   file: string | null;
   error?: string;
   rendered_at?: number;
+  /** asal clip dari kolom referensi: timeline riset, link clip referensi, atau titik waktu */
+  ref?: "timeline" | "link" | "titik" | null;
 }
 
 export interface Project {
@@ -37,7 +39,19 @@ export interface Project {
   size_mb?: number;
   used_ai?: boolean;
   n_clips?: number;
+  /** isi kolom "Referensi & instruksi" */
+  brief?: string;
   clips?: Clip[];
+}
+
+/** Hasil /api/parse-brief: apa saja yang dikenali dari kolom referensi */
+export interface BriefSummary {
+  ranges: { start: number; end: number; note: string }[];
+  points: { t: number; note: string }[];
+  links: string[];
+  instructions: string;
+  keywords: string[];
+  avoid: string[];
 }
 
 export interface AppState {

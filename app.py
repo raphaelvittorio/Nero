@@ -4,6 +4,7 @@ Buka http://127.0.0.1:7860 setelah menjalankan run.bat
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -273,26 +274,13 @@ def do_analyze(pid, token):
                 json.dump(segs, f, ensure_ascii=False)
         segs = segments_of(p)
 
-        # 3. momen terbaik
+        # 3. momen terbaik (timeline/link/instruksi dari kolom referensi lebih dulu)
         alive()
         set_stage(p, "Mencari momen paling menarik...", 0.5, "proses")
-        n, mn, mx = int(p.get("n_clips") or s["n_clips"]), int(s["min_len"]), int(s["max_len"])
-        clips, used_ai = None, False
-        if s.get("api_key"):
-            set_stage(p, "Claude sedang memilih momen terbaik...", 0.5)
-            try:
-                clips, note = core.find_highlights_ai(segs, s["api_key"], n, mn, mx, s["ai_model"],
-                                                      p.get("title", ""))
-                used_ai = bool(clips)
-                if note:
-                    p["warning"] = note
-            except Exception as e:
-                p["warning"] = f"AI gagal, memakai deteksi lokal. ({e})"[:300]
+        clips, used_ai, warns = pick_clips(p, segs, s, lang, src_path, wav, alive)
+        if warns:
+            p["warning"] = " · ".join(warns)[:900]
         alive()
-        if not clips:
-            if not os.path.exists(wav):
-                core.extract_audio(src_path, wav)
-            clips = core.find_highlights_heuristic(segs, core.audio_energy(wav), n, mn, mx)
         for c in clips:
             c["id"] = uuid.uuid4().hex[:8]
             c["selected"] = True
@@ -322,6 +310,169 @@ def do_analyze(pid, token):
     finally:
         # hemat disk: audio.wav (~2 MB per menit) selalu bisa dibuat ulang dari video
         remove_files(wav)
+
+
+MAX_REFS = 5  # link clip referensi per proyek
+
+
+def youtube_id(url):
+    m = re.search(r"(?:youtu\.be/|[?&]v=|/shorts/|/live/|/embed/)([\w-]{11})", url or "")
+    return m.group(1) if m else None
+
+
+def url_time(url):
+    """Detik dari ?t= / &start= di link YouTube (t=754, t=754s, t=12m34s, t=1h2m3s)."""
+    m = re.search(r"[?&#](?:t|start)=([\dhms.]+)", url or "")
+    if not m:
+        return None
+    v = m.group(1)
+    if re.fullmatch(r"\d+(?:\.\d+)?s?", v):
+        return float(v.rstrip("s"))
+    parts = {u: re.search(rf"(\d+){u}", v) for u in "hms"}
+    secs = sum(int(x.group(1)) * k for u, k in (("h", 3600), ("m", 60), ("s", 1)) if (x := parts[u]))
+    return float(secs) if any(parts.values()) else None
+
+
+def load_references(p, links, s, lang, alive):
+    """Unduh audio clip referensi lalu buat transkripnya. Hasil disimpan di folder refs/ proyek,
+    jadi 'Cari ulang momen' tidak perlu mengunduh lagi."""
+    d = os.path.join(pdir(p["id"]), "refs")
+    os.makedirs(d, exist_ok=True)
+    refs, warns = [], []
+    for i, url in enumerate(links, 1):
+        cache = os.path.join(d, hashlib.sha1(url.encode("utf-8")).hexdigest()[:12] + ".json")
+        if os.path.exists(cache):
+            try:
+                with open(cache, encoding="utf-8") as f:
+                    refs.append(json.load(f))
+                continue
+            except Exception:
+                pass
+        tmp = os.path.join(d, "tmp")
+        label = f"clip referensi {i}/{len(links)}"
+        try:
+            alive()
+            set_stage(p, f"Mengunduh {label}...", 0)
+            info = core.download_reference(url, tmp, s.get("cookies_browser") or None)
+            alive()
+            wav = os.path.join(tmp, "ref.wav")
+            core.extract_audio(info["path"], wav)
+
+            def cb(x):
+                alive()
+                set_stage(p, f"Membuat transkrip {label}...", x)
+
+            segs = core.transcribe(wav, s["whisper_model"], lang, progress=cb)
+            ref = {"url": url, "title": info["title"], "segments": segs}
+            with open(cache, "w", encoding="utf-8") as f:
+                json.dump(ref, f, ensure_ascii=False)
+            refs.append(ref)
+        except Cancelled:
+            raise
+        except Exception as e:
+            msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e)).replace("ERROR: ", "")
+            warns.append(f"Clip referensi {i} gagal diproses ({msg[:140]})")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return refs, warns
+
+
+def pick_clips(p, segs, s, lang, src_path, wav, alive):
+    """Pilih momen. Isi kolom 'Referensi & instruksi' didahulukan:
+    timeline & link referensi yang cocok -> pasti jadi clip; titik waktu -> momen di sekitarnya;
+    instruksi/contoh -> mengarahkan AI (atau kata kunci di mode lokal). Sisa jumlah clip diisi otomatis.
+    Hasil: (clips, used_ai, peringatan)."""
+    warns = []
+    brief = core.parse_brief(p.get("brief") or "")
+    dur = p.get("duration") or (segs[-1]["end"] if segs else 0)
+    n, mn, mx = int(p.get("n_clips") or s["n_clips"]), int(s["min_len"]), int(s["max_len"])
+    fixed, points, examples = [], [], []
+
+    for r in brief["ranges"]:
+        a, b = r["start"], min(r["end"], dur)
+        if a >= dur or b - a < 1:
+            why = "melewati durasi video" if a >= dur else "waktu selesai harus setelah waktu mulai"
+            warns.append(f"Timeline {core._fmt(r['start'])} - {core._fmt(r['end'])} dilewati: {why}")
+            continue
+        a, b = core.snap_range(segs, a, b)
+        fixed.append({"start": a, "end": b, "note": r["note"], "ref": "timeline"})
+    for pt in brief["points"]:
+        if pt["t"] < dur:
+            points.append(pt)
+        else:
+            warns.append(f"Titik {core._fmt(pt['t'])} dilewati: melewati durasi video")
+
+    main_id, others = youtube_id(p.get("url")), []
+    for url in brief["links"]:
+        if main_id and youtube_id(url) == main_id:  # link video ini sendiri, mis. disalin dengan ?t=
+            t = url_time(url)
+            if t is not None and t < dur:
+                points.append({"t": t, "note": ""})
+            continue
+        if url != p.get("url"):
+            others.append(url)
+    if len(others) > MAX_REFS:
+        warns.append(f"Hanya {MAX_REFS} link referensi pertama yang dipakai.")
+        others = others[:MAX_REFS]
+    if others:
+        refs, w = load_references(p, others, s, lang, alive)
+        warns += w
+        for ref in refs:
+            m = core.match_reference(segs, ref["segments"])
+            if m:
+                a, b = core.snap_range(segs, m["start"], m["end"], tol=1.5)
+                fixed.append({"start": a, "end": b, "note": "", "ref": "link", "ratio": m["ratio"]})
+                continue
+            text = " ".join(x["text"] for x in ref["segments"]).strip()
+            if text:
+                examples.append(text[:1500])
+            warns.append(f'Clip referensi "{str(ref.get("title", ""))[:60]}" tidak ditemukan di video ini; '
+                         "dipakai sebagai contoh gaya/topik.")
+
+    # timeline & link yang menunjuk momen yang sama cukup dibuat sekali
+    uniq = []
+    for f in fixed:
+        if not any(min(f["end"], u["end"]) - max(f["start"], u["start"])
+                   > 0.5 * min(f["end"] - f["start"], u["end"] - u["start"]) for u in uniq):
+            uniq.append(f)
+    fixed = uniq
+
+    energy_cache = []
+
+    def energy():
+        if not energy_cache:
+            if not os.path.exists(wav):
+                core.extract_audio(src_path, wav)
+            energy_cache.append(core.audio_energy(wav))
+        return energy_cache[0]
+
+    clips, used_ai = None, False
+    if s.get("api_key"):
+        set_stage(p, "Claude sedang memilih momen terbaik...", 0.5)
+        try:
+            clips, note = core.find_highlights_ai(
+                segs, s["api_key"], max(n - len(fixed), len(points)), mn, mx, s["ai_model"], p.get("title", ""),
+                brief={"instructions": brief["instructions"], "examples": examples, "fixed": fixed, "points": points})
+            used_ai = bool(clips)
+            if note:
+                warns.append(note)
+        except Exception as e:
+            clips = None
+            warns.append(f"AI gagal, memakai deteksi lokal. ({e})"[:300])
+    alive()
+    if clips:
+        missing = [pt for pt in points if not any(c["start"] - 1 <= pt["t"] <= c["end"] for c in clips)]
+        if missing:  # AI melewatkan titik riset: tambahkan momen di sekitarnya
+            clips += core.find_highlights_heuristic(segs, energy(), 0, mn, mx, points=missing,
+                                                    taken=[(c["start"], c["end"]) for c in clips])
+    else:
+        want, avoid = core.brief_keywords(brief["instructions"])
+        if examples:  # tanpa AI: kata yang sering muncul di clip referensi jadi petunjuk topik
+            want += [h[1:] for h in core._hashtags(" ".join(examples), 5) if h not in ("#fyp", "#viral")]
+        clips = core.find_highlights_heuristic(segs, energy(), max(0, n - len(fixed) - len(points)), mn, mx,
+                                               keywords=want, avoid=avoid, points=points, fixed=fixed)
+    clips.sort(key=lambda c: c["start"])
+    return clips, used_ai, warns
 
 
 def output_files(rel):
@@ -422,13 +573,20 @@ def queue_render(pid, cid):
     return True
 
 
-def new_project(url=None, source=None, title=None, n_clips=None, auto_render=False, language=None):
+BRIEF_LIMIT = 20_000  # karakter kolom "Referensi & instruksi"
+
+
+def clean_brief(v):
+    return str(v or "").strip()[:BRIEF_LIMIT]
+
+
+def new_project(url=None, source=None, title=None, n_clips=None, auto_render=False, language=None, brief=None):
     pid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     os.makedirs(pdir(pid), exist_ok=True)
     p = {"id": pid, "url": url, "source": source, "title": title or url or "Video",
          "status": "antri", "stage": "Menunggu giliran...", "progress": 0, "clips": [],
          "created": time.time(), "n_clips": n_clips, "auto_render": auto_render, "error": "",
-         "language": language if language in LANGUAGES else None}
+         "language": language if language in LANGUAGES else None, "brief": clean_brief(brief)}
     projects[pid] = p
     save_project(p)
     return p
@@ -501,7 +659,7 @@ def add_links():
         return jsonify(error="Tidak ada link yang valid."), 400
     for url in links:
         p = new_project(url=url, n_clips=body.get("n_clips"), auto_render=body.get("auto_render", False),
-                        language=body.get("language"))
+                        language=body.get("language"), brief=body.get("brief"))
         queue_analyze(p["id"])
     return jsonify(ok=True, count=len(links))
 
@@ -514,8 +672,8 @@ def upload():
     title = os.path.splitext(f.filename)[0]
     p = new_project(title=title, n_clips=request.form.get("n_clips", type=int),
                     auto_render=request.form.get("auto_render") == "true",
-                    language=request.form.get("language"))
-    ext = os.path.splitext(f.filename)[1].lower() or ".mp4"
+                    language=request.form.get("language"), brief=request.form.get("brief"))
+    ext =os.path.splitext(f.filename)[1].lower() or ".mp4"
     f.save(os.path.join(pdir(p["id"]), "source" + ext))
     p["source"] = "source" + ext
     save_project(p)
@@ -539,8 +697,18 @@ def reanalyze(pid):
     body = request.get_json(silent=True) or {}
     if body.get("n_clips"):
         p["n_clips"] = int(body["n_clips"])
+    if "brief" in body:
+        p["brief"] = clean_brief(body["brief"])
     queue_analyze(pid)
     return jsonify(ok=True)
+
+
+@app.post("/api/parse-brief")
+def parse_brief():
+    """Ringkasan isi kolom referensi (dipakai halaman untuk menunjukkan apa yang dikenali)."""
+    b = core.parse_brief(clean_brief((request.get_json(silent=True) or {}).get("text")))
+    want, avoid = core.brief_keywords(b["instructions"])
+    return jsonify({**b, "keywords": want, "avoid": avoid})
 
 
 @app.post("/api/project/<pid>/cancel")

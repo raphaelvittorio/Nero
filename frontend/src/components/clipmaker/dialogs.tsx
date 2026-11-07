@@ -20,6 +20,7 @@ import { COOKIE_BROWSERS, LANGUAGES, WHISPER_MODELS } from "@/lib/options";
 import type { Language, Settings, TranscriptLine } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+import { BriefField } from "./brief-field";
 import { SimpleSelect } from "./fields";
 import { useStore } from "./store";
 
@@ -296,7 +297,9 @@ function SettingsForm({ settings }: { settings: Settings }) {
 export function ReanalyzeDialog({ pid, onClose }: { pid: string | null; onClose: () => void }) {
   return (
     <Dialog open={pid !== null} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent>{pid && <ReanalyzeForm key={pid} pid={pid} onClose={onClose} />}</DialogContent>
+      <DialogContent className="sm:max-w-xl">
+        {pid && <ReanalyzeForm key={pid} pid={pid} onClose={onClose} />}
+      </DialogContent>
     </Dialog>
   );
 }
@@ -304,10 +307,11 @@ export function ReanalyzeDialog({ pid, onClose }: { pid: string | null; onClose:
 function ReanalyzeForm({ pid, onClose }: { pid: string; onClose: () => void }) {
   const { project, settings, refresh } = useStore();
   const [n, setN] = useState(project(pid)?.n_clips || settings?.n_clips || 5);
+  const [brief, setBrief] = useState(project(pid)?.brief ?? "");
 
   async function go() {
     try {
-      await post(`/api/project/${pid}/reanalyze`, { n_clips: n });
+      await post(`/api/project/${pid}/reanalyze`, { n_clips: n, brief });
       onClose();
       refresh();
     } catch {}
@@ -317,8 +321,14 @@ function ReanalyzeForm({ pid, onClose }: { pid: string; onClose: () => void }) {
     <>
       <DialogHeader>
         <DialogTitle>Cari ulang momen</DialogTitle>
-        <DialogDescription>Daftar clip sekarang akan diganti dengan hasil pencarian baru.</DialogDescription>
+        <DialogDescription>
+          Daftar clip sekarang akan diganti dengan hasil pencarian baru. Transkrip dipakai ulang, jadi cepat.
+        </DialogDescription>
       </DialogHeader>
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="re_brief">Referensi & instruksi (opsional)</Label>
+        <BriefField value={brief} onChange={setBrief} hasKey={Boolean(settings?.has_key)} id="re_brief" />
+      </div>
       <div className="flex items-center gap-3">
         <Label htmlFor="re_n">Berapa clip yang dicari?</Label>
         <Input
@@ -329,7 +339,6 @@ function ReanalyzeForm({ pid, onClose }: { pid: string; onClose: () => void }) {
           value={n}
           onChange={(e) => setN(Number(e.target.value) || 1)}
           className="w-20"
-          autoFocus
         />
       </div>
       <DialogFooter>

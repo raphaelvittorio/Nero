@@ -1,12 +1,13 @@
 "use client";
 
-import { PlayIcon, UploadIcon } from "lucide-react";
+import { ChevronDownIcon, PlayIcon, TargetIcon, UploadIcon } from "lucide-react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -14,12 +15,15 @@ import { post } from "@/lib/api";
 import { LANGUAGES } from "@/lib/options";
 import { cn } from "@/lib/utils";
 
+import { BriefField } from "./brief-field";
 import { SimpleSelect } from "./fields";
 import { useStore } from "./store";
 
 export function InputCard() {
   const { settings, nClips, setNClips, language, setLanguage, refresh } = useStore();
   const [links, setLinks] = useState("");
+  const [brief, setBrief] = useState("");
+  const [briefOpen, setBriefOpen] = useState(false);
   const [autoRender, setAutoRender] = useState(false);
   const [over, setOver] = useState(false);
   const [uploading, setUploading] = useState<string | null>(null);
@@ -33,8 +37,9 @@ export function InputCard() {
     }
     setSending(true);
     try {
-      const r = await post("/api/add", { links, n_clips: nClips, auto_render: autoRender, language });
+      const r = await post("/api/add", { links, n_clips: nClips, auto_render: autoRender, language, brief });
       setLinks("");
+      setBrief(""); // timeline riset berlaku untuk video yang barusan diproses
       toast.success(`${r.count} video masuk antrian`);
       refresh();
     } catch {
@@ -52,9 +57,11 @@ export function InputCard() {
         fd.append("n_clips", String(nClips));
         fd.append("auto_render", String(autoRender));
         fd.append("language", language);
+        fd.append("brief", brief);
         setUploading(f.name);
         await post("/api/upload", fd);
       }
+      setBrief("");
       toast.success("File masuk antrian");
     } catch {
     } finally {
@@ -113,6 +120,28 @@ export function InputCard() {
           hidden
           onChange={(e) => uploadFiles(e.target.files)}
         />
+
+        <Collapsible open={briefOpen} onOpenChange={setBriefOpen} className="rounded-xl border">
+          <CollapsibleTrigger className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-sm font-medium">
+            <TargetIcon className="size-4 text-primary" />
+            <span>Referensi & instruksi</span>
+            <span className="text-xs font-normal text-muted-foreground">
+              (opsional: timeline riset, link clip contoh, prompt)
+            </span>
+            {brief.trim() && !briefOpen && <span className="size-2 rounded-full bg-primary" title="Sudah diisi" />}
+            <ChevronDownIcon
+              className={cn("ml-auto size-4 text-muted-foreground transition-transform", briefOpen && "rotate-180")}
+            />
+          </CollapsibleTrigger>
+          <CollapsibleContent className="px-3.5 pb-3.5">
+            <BriefField value={brief} onChange={setBrief} hasKey={Boolean(settings?.has_key)} id="brief" />
+            {links.trim().split(/\s+/).filter((l) => l.startsWith("http")).length > 1 && brief.trim() && (
+              <p className="mt-2 text-xs text-warn">
+                Referensi ini dipakai untuk semua link di atas. Timeline riset sebaiknya diproses satu video sekali.
+              </p>
+            )}
+          </CollapsibleContent>
+        </Collapsible>
 
         <div className="flex flex-wrap items-center gap-x-5 gap-y-3 pt-1">
           <div className="flex items-center gap-2">

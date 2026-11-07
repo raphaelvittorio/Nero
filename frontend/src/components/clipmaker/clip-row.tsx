@@ -6,6 +6,9 @@ import {
   DownloadIcon,
   FolderOpenIcon,
   LightbulbIcon,
+  LinkIcon,
+  MapPinIcon,
+  PinIcon,
   PlayIcon,
   RotateCwIcon,
   XIcon,
@@ -23,6 +26,12 @@ import { cn } from "@/lib/utils";
 
 import { CommitInput } from "./fields";
 import { useStore } from "./store";
+
+const REF_BADGE = {
+  timeline: { icon: <PinIcon />, label: "Timeline Anda" },
+  link: { icon: <LinkIcon />, label: "Sama dengan clip referensi" },
+  titik: { icon: <MapPinIcon />, label: "Titik riset Anda" },
+} as const;
 
 function scoreClass(s: number) {
   return s >= 80 ? "text-ok" : s >= 65 ? "text-primary" : "text-muted-foreground";
@@ -146,10 +155,19 @@ export function ClipRow({ p, c }: { p: Project; c: Clip }) {
             </Button>
           )}
         </div>
-        {c.reason && (
-          <Badge variant="secondary" className="mb-1.5 h-auto whitespace-normal text-muted-foreground">
-            <LightbulbIcon /> {c.reason}
-          </Badge>
+        {(c.ref || c.reason) && (
+          <div className="mb-1.5 flex flex-wrap gap-1.5">
+            {c.ref && (
+              <Badge variant="outline" className="text-primary">
+                {REF_BADGE[c.ref].icon} {REF_BADGE[c.ref].label}
+              </Badge>
+            )}
+            {c.reason && (
+              <Badge variant="secondary" className="h-auto whitespace-normal text-muted-foreground">
+                <LightbulbIcon /> {c.reason}
+              </Badge>
+            )}
+          </div>
         )}
         <p
           onClick={() => setTextOpen((v) => !v)}
