@@ -53,7 +53,7 @@ Tanpa pengaturan apa pun, momen dipilih oleh algoritma lokal (gratis). Untuk pem
 |---|---|
 | Unduhan YouTube gagal / "confirm you're not a bot" | Di **Pengaturan**, isi "Ambil cookies dari browser" dengan browser tempat Anda login YouTube (chrome/edge/firefox). Tutup browser itu saat mengunduh. |
 | Unduhan tiba-tiba gagal padahal dulu bisa | Jalankan **update.bat** (situs video sering berubah). |
-| Transkrip lambat | Lihat baris di bawah tombol Proses: bila tertulis "memakai CPU" padahal ada kartu NVIDIA, jalankan **install.bat** lagi. Atau di **Pengaturan** ganti model transkrip ke **base**. Dengan GPU, model **medium/large-v3** pun berjalan cepat. |
+| Transkrip lambat | Lihat baris di bawah tombol Proses: bila tertulis "memakai CPU" padahal ada kartu NVIDIA, jalankan **install.bat** lagi. Atau di **Pengaturan** ganti model transkrip ke **base**. Dengan GPU, pakai **large-v3-turbo**: hampir seakurat large-v3 tetapi jauh lebih cepat. |
 | Subtitle kurang tepat / malah diterjemahkan | Pastikan pilihan **Bahasa** saat menambahkan video sesuai bahasa yang diucapkan (atau pilih Deteksi otomatis), dan pakai model **medium**. |
 | Wajah tidak diikuti | Pilih tata letak **Ikuti wajah**, **Dua orang (atas/bawah)** untuk podcast, atau **Video utuh + latar blur** untuk video dengan banyak orang. |
 
@@ -67,8 +67,22 @@ ClipMaker/
   requirements*.txt daftar paket (lock = versi yang sudah teruji, gpu = pustaka CUDA)
   app.py            server web lokal
   clipper_core.py   mesin unduh, transkrip, deteksi momen, render
-  web/index.html    tampilan aplikasi
+  web/              tampilan aplikasi siap pakai (hasil build frontend/, jangan diubah langsung)
+  frontend/         kode sumber tampilan: Next.js + TypeScript + Tailwind CSS + shadcn/ui
   models/           model deteksi wajah
   output/           HASIL VIDEO ANDA
   data/             proyek, transkrip, pengaturan
 ```
+
+## Mengubah tampilan (khusus pengembang)
+
+Pemakai biasa tidak perlu Node.js: tampilan yang sudah jadi ada di folder `web/`. Node.js 20.9 atau lebih baru hanya dibutuhkan bila ingin mengubah tampilan.
+
+1. Sekali saja: buka terminal di folder `frontend` lalu jalankan `npm install`.
+2. Jalankan backend dengan izin untuk server pengembangan, lalu server tampilan:
+   ```
+   set CLIPMAKER_DEV_ORIGINS=localhost:3000
+   run.bat
+   ```
+   Di terminal lain, dari folder `frontend`: `npm run dev`, lalu buka http://localhost:3000. Perubahan kode langsung terlihat; permintaan `/api`, `/media`, dan `/out` diteruskan ke app.py di port 7860.
+3. Setelah selesai: `npm run build` di folder `frontend`. Hasilnya otomatis disalin ke `web/`, lalu `run.bat` memakai tampilan baru.

@@ -7,22 +7,21 @@ echo   ClipMaker - Instalasi (cukup sekali)
 echo ============================================================
 echo.
 
-REM ---- 1. Python ----
+REM ---- 1. Python 3.14 (versi yang dipakai requirements-lock.txt) ----
 set "PY="
-where py >nul 2>nul && set "PY=py -3"
-if not defined PY (where python >nul 2>nul && set "PY=python")
-if defined PY (
-  %PY% -c "import sys; exit(0 if sys.version_info>=(3,10) else 1)" >nul 2>nul || set "PY="
+where py >nul 2>nul && py -3.14 -c "pass" >nul 2>nul && set "PY=py -3.14"
+if not defined PY (
+  where python >nul 2>nul && python -c "import sys; exit(0 if sys.version_info[:2]==(3,14) else 1)" >nul 2>nul && set "PY=python"
 )
 if not defined PY (
-  echo [1/4] Python belum ada. Menginstal Python 3.12...
-  winget install -e --id Python.Python.3.12 --scope user --accept-package-agreements --accept-source-agreements
+  echo [1/4] Python 3.14 belum ada. Menginstal Python 3.14...
+  winget install -e --id Python.Python.3.14 --scope user --accept-package-agreements --accept-source-agreements
   echo.
   echo Python selesai diinstal. TUTUP jendela ini lalu jalankan install.bat sekali lagi.
   pause
   exit /b
 )
-echo [1/4] Python ditemukan.
+echo [1/4] Python 3.14 ditemukan.
 
 REM ---- 2. Deno (dibutuhkan yt-dlp untuk YouTube) & FFmpeg ----
 where deno >nul 2>nul
@@ -40,6 +39,13 @@ if errorlevel 1 (
 
 REM ---- 3. Lingkungan Python ----
 echo [3/4] Menyiapkan lingkungan Python...
+REM lingkungan lama dari Python versi sebelumnya dibuat ulang supaya memakai Python 3.14
+if exist ".venv\Scripts\python.exe" (
+  ".venv\Scripts\python.exe" -c "import sys; exit(0 if sys.version_info[:2]==(3,14) else 1)" >nul 2>nul || (
+    echo       Lingkungan lama memakai Python versi lain, membuat ulang...
+    rmdir /s /q ".venv"
+  )
+)
 if not exist ".venv\Scripts\python.exe" %PY% -m venv .venv
 call ".venv\Scripts\activate.bat"
 python -m pip install --upgrade pip

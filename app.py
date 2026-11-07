@@ -25,6 +25,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(APP_DIR, "data")
 PROJ = os.path.join(DATA, "projects")
 OUTPUT = os.path.join(APP_DIR, "output")
+WEB = os.path.join(APP_DIR, "web")  # tampilan siap pakai (hasil build frontend/)
 SETTINGS_PATH = os.path.join(DATA, "settings.json")
 os.makedirs(PROJ, exist_ok=True)
 os.makedirs(OUTPUT, exist_ok=True)
@@ -56,6 +57,9 @@ render_q: "queue.Queue[tuple]" = queue.Queue()
 projects: dict[str, dict] = {}
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+# Hanya untuk pengembangan tampilan (`npm run dev` di frontend/): izinkan origin server dev Next.js,
+# mis. CLIPMAKER_DEV_ORIGINS=localhost:3000. Kosong saat aplikasi dipakai biasa.
+DEV_ORIGINS = {o.strip().lower() for o in os.environ.get("CLIPMAKER_DEV_ORIGINS", "").split(",") if o.strip()}
 
 
 class Cancelled(Exception):
@@ -76,7 +80,7 @@ def only_local_requests():
         return jsonify(error="Host tidak diizinkan."), 403
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         origin = request.headers.get("Origin")
-        if origin is not None and urlsplit(origin).netloc.lower() != request.host.lower():
+        if origin is not None and urlsplit(origin).netloc.lower() not in {request.host.lower(), *DEV_ORIGINS}:
             return jsonify(error="Permintaan dari situs lain ditolak."), 403
 
 
@@ -361,6 +365,7 @@ def do_render(pid, cid, token):
         if old and old != rel:  # judul berubah: buang hasil render lama clip ini
             remove_later(remove_files(*output_files(old)))
         c["file"] = rel
+        c["rendered_at"] = int(time.time())  # untuk memuat ulang thumbnail di halaman
         c["render_status"], c["render_progress"] = "selesai", 1
     except Exception as e:
         if out:  # buang file sementara dari render yang tidak selesai
@@ -434,7 +439,14 @@ def new_project(url=None, source=None, title=None, n_clips=None, auto_render=Fal
 # --------------------------------------------------------------------------
 @app.get("/")
 def index():
-    return send_from_directory(os.path.join(APP_DIR, "web"), "index.html")
+    return send_from_directory(WEB, "index.html", max_age=0)
+
+
+@app.get("/<path:name>")
+def web_file(name):
+    """Berkas tampilan hasil `npm run build` di folder frontend/ (Next.js, disalin ke web/)."""
+    # nama berkas di _next/static selalu berubah setiap build, jadi aman disimpan lama di cache
+    return send_from_directory(WEB, name, max_age=31536000 if name.startswith("_next/static/") else 0)
 
 
 @app.get("/api/state")

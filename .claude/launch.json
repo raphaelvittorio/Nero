@@ -5,8 +5,15 @@
       "name": "clipmaker",
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["app.py"],
-      "env": { "NO_BROWSER": "1", "PYTHONUNBUFFERED": "1" },
-      "port": 7860
+      "env": { "NO_BROWSER": "1", "PYTHONUNBUFFERED": "1", "CLIPMAKER_DEV_ORIGINS": "localhost:3000" },
+      "port": 7860,
+      "autoPort": false
+    },
+    {
+      "name": "clipmaker-ui-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "frontend", "run", "dev"],
+      "port": 3000
     }
   ]
 }
