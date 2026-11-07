@@ -17,7 +17,7 @@ import uuid
 import webbrowser
 from urllib.parse import urlsplit
 
-from flask import Flask, jsonify, request, send_from_directory, abort
+from flask import Flask, Response, jsonify, request, send_from_directory, abort
 
 import clipper_core as core
 
@@ -46,21 +46,25 @@ DEFAULT_SETTINGS = {
         "progress_bar": True, "handle": "", "loudnorm": True,
     },
 }
+LANGUAGES = {"id", "en", "auto", "ms", "jv"}
 
 app = Flask(__name__, static_folder=None)
 lock = threading.RLock()
-jobs: "queue.Queue[tuple]" = queue.Queue()
+# Dua antrian terpisah: video panjang yang sedang ditranskrip tidak menahan render clip lain.
+analyze_q: "queue.Queue[tuple]" = queue.Queue()
+render_q: "queue.Queue[tuple]" = queue.Queue()
 projects: dict[str, dict] = {}
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 class Cancelled(Exception):
-    """Proyek dihapus saat sedang diproses."""
+    """Tugas dibatalkan pengguna atau proyeknya dihapus."""
 
 
-def ensure_alive(pid):
-    if pid not in projects:
+def check_job(pid, obj, token):
+    """Setiap tugas membawa token; bila token di proyek/clip berganti, tugas lama berhenti."""
+    if pid not in projects or obj.get("job") != token:
         raise Cancelled()
 
 
@@ -104,7 +108,7 @@ def save_project(p):
     with lock:
         if p["id"] not in projects:  # sudah dihapus: jangan tulis ulang project.json
             return
-        light = {k: v for k, v in p.items() if k != "segments"}
+        light = {k: v for k, v in p.items() if k not in ("segments", "job")}
         with open(os.path.join(pdir(p["id"]), "project.json"), "w", encoding="utf-8") as f:
             json.dump(light, f, ensure_ascii=False, indent=1)
 
@@ -120,8 +124,12 @@ def load_projects():
             with open(fp, encoding="utf-8") as f:
                 p = json.load(f)
             if p.get("status") not in ("siap", "gagal"):
-                p["status"], p["stage"] = "gagal", "Terhenti (aplikasi ditutup). Klik Ulangi."
+                if p.get("clips"):  # pencarian ulang terhenti: daftar clip lama masih utuh
+                    p["status"], p["stage"] = "siap", "Pencarian ulang terhenti (aplikasi ditutup)."
+                else:
+                    p["status"], p["stage"] = "gagal", "Terhenti (aplikasi ditutup). Klik Ulangi."
             for c in p.get("clips", []):
+                c.pop("job", None)
                 if c.get("render_status") in ("antri", "proses"):
                     c["render_status"] = None
             projects[pid] = p
@@ -155,76 +163,150 @@ def set_stage(p, stage, prog=None, status=None):
             p["status"] = status
 
 
+def remove_files(*paths):
+    """Hapus file; kembalikan daftar yang gagal (biasanya karena masih dibuka di Windows)."""
+    failed = []
+    for path in paths:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            failed.append(path)
+    return failed
+
+
+def remove_later(paths, tries=30, delay=2.0):
+    """Coba hapus lagi di latar belakang (mis. video masih diputar di browser)."""
+    def run():
+        left = list(paths)
+        for _ in range(tries):
+            nxt = []
+            for path in left:
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                    if os.path.exists(path):
+                        nxt.append(path)
+                else:
+                    nxt += remove_files(path)
+            left = nxt
+            if not left:
+                return
+            time.sleep(delay)
+    if paths:
+        threading.Thread(target=run, daemon=True).start()
+
+
+def dir_size_mb(path):
+    total = 0
+    try:
+        for e in os.scandir(path):
+            if e.is_file(follow_symlinks=False):
+                total += e.stat().st_size
+    except OSError:
+        pass
+    return round(total / 1e6, 1)
+
+
+def busy(p):
+    return p.get("status") in ("antri", "proses") or any(
+        c.get("render_status") in ("antri", "proses") for c in p.get("clips", []))
+
+
 # --------------------------------------------------------------------------
-# Pekerja (satu per satu supaya komputer tidak berat)
+# Pekerja: satu untuk analisis, satu untuk render
 # --------------------------------------------------------------------------
-def do_analyze(pid):
+def do_analyze(pid, token):
     p = projects[pid]
+    if p.get("job") != token:
+        return
     s = load_settings()
     d = pdir(pid)
+    lang = p.get("language") or s["language"]
+    wav = os.path.join(d, "audio.wav")
+    tr = os.path.join(d, "transcript.json")
+
+    def alive():
+        check_job(pid, p, token)
 
     def stage_cb(label):
         def cb(x):
-            ensure_alive(pid)  # hentikan pekerjaan bila proyek dihapus
+            alive()
             set_stage(p, label, x)
         return cb
 
     try:
-        p["error"] = ""
+        p["error"], p["warning"] = "", ""
         # 1. sumber
         src = p.get("source")
         if not src or not os.path.exists(os.path.join(d, src)):
+            if not p.get("url"):
+                raise RuntimeError("Video sumber sudah dihapus dan tidak ada link untuk mengunduh ulang.")
             set_stage(p, "Mengunduh video...", 0, "proses")
             info = core.download_video(p["url"], d, progress=stage_cb("Mengunduh video..."),
                                        cookies_browser=s.get("cookies_browser") or None)
+            alive()
             p["source"] = os.path.basename(info["path"])
             p["title"] = info["title"]
+            p.pop("source_removed", None)
             save_project(p)
         src_path = os.path.join(d, p["source"])
         vi = core.probe(src_path)
         p["duration"], p["width"], p["height"] = vi.duration, vi.width, vi.height
 
         # 2. audio + transkrip
-        wav = os.path.join(d, "audio.wav")
-        tr = os.path.join(d, "transcript.json")
         if not os.path.exists(tr):
+            alive()
             set_stage(p, "Menyiapkan audio...", 0, "proses")
             core.extract_audio(src_path, wav)
-            set_stage(p, f"Membuat transkrip (model {s['whisper_model']})... pertama kali akan mengunduh model AI", 0)
-            segs = core.transcribe(wav, s["whisper_model"], s["language"],
-                                   progress=stage_cb("Membuat transkrip..."))
+            alive()
+            dev = "GPU" if core.transcribe_device() == "cuda" else "CPU"
+            set_stage(p, f"Membuat transkrip ({dev}, model {s['whisper_model']})...", 0)
+            segs = core.transcribe(wav, s["whisper_model"], lang,
+                                   progress=stage_cb(f"Membuat transkrip ({dev})..."))
+            alive()
             with open(tr, "w", encoding="utf-8") as f:
                 json.dump(segs, f, ensure_ascii=False)
         segs = segments_of(p)
-        if not os.path.exists(wav):
-            core.extract_audio(src_path, wav)
 
         # 3. momen terbaik
+        alive()
         set_stage(p, "Mencari momen paling menarik...", 0.5, "proses")
         n, mn, mx = int(p.get("n_clips") or s["n_clips"]), int(s["min_len"]), int(s["max_len"])
         clips, used_ai = None, False
         if s.get("api_key"):
+            set_stage(p, "Claude sedang memilih momen terbaik...", 0.5)
             try:
-                clips = core.find_highlights_ai(segs, s["api_key"], n, mn, mx, s["ai_model"], p.get("title", ""))
-                used_ai = True
+                clips, note = core.find_highlights_ai(segs, s["api_key"], n, mn, mx, s["ai_model"],
+                                                      p.get("title", ""))
+                used_ai = bool(clips)
+                if note:
+                    p["warning"] = note
             except Exception as e:
                 p["warning"] = f"AI gagal, memakai deteksi lokal. ({e})"[:300]
+        alive()
         if not clips:
+            if not os.path.exists(wav):
+                core.extract_audio(src_path, wav)
             clips = core.find_highlights_heuristic(segs, core.audio_energy(wav), n, mn, mx)
-        for i, c in enumerate(clips):
+        for c in clips:
             c["id"] = uuid.uuid4().hex[:8]
             c["selected"] = True
             c["render_status"] = None
             c["file"] = None
-        p["clips"] = clips
-        p["used_ai"] = used_ai
-        set_stage(p, f"Selesai: {len(clips)} momen ditemukan", 1, "siap")
+        with lock:
+            alive()
+            p["clips"] = clips
+            p["used_ai"] = used_ai
+            set_stage(p, f"Selesai: {len(clips)} momen ditemukan", 1, "siap")
         save_project(p)
         if p.get("auto_render"):
             for c in clips:
                 queue_render(pid, c["id"])
+    except Cancelled:
+        return
     except Exception as e:
-        if pid not in projects:  # dihapus di tengah jalan, bukan kegagalan
+        if pid not in projects or p.get("job") != token:  # dihapus/dibatalkan, bukan kegagalan
             return
         traceback.print_exc()
         msg = str(e)
@@ -233,12 +315,24 @@ def do_analyze(pid):
         p["error"] = msg[:600]
         set_stage(p, "Gagal", None, "gagal")
         save_project(p)
+    finally:
+        # hemat disk: audio.wav (~2 MB per menit) selalu bisa dibuat ulang dari video
+        remove_files(wav)
 
 
-def do_render(pid, cid):
+def output_files(rel):
+    base = os.path.join(OUTPUT, rel).rsplit(".", 1)[0]
+    return [base + ext for ext in (".mp4", ".srt", ".jpg", "_caption.txt")]
+
+
+def do_render(pid, cid, token):
     p = projects[pid]
     c = next((x for x in p.get("clips", []) if x["id"] == cid), None)
-    if not c:
+    if not c or c.get("job") != token:
+        return
+    if not p.get("source"):
+        c["render_status"], c["error"] = "gagal", "Video sumber sudah dihapus."
+        save_project(p)
         return
     s = load_settings()
     style = {**s["style"], **(p.get("style") or {})}
@@ -247,14 +341,14 @@ def do_render(pid, cid):
         c["render_status"], c["render_progress"], c["error"] = "proses", 0, ""
         segs = segments_of(p)
         words = [w for w in all_words(segs) if w["end"] > c["start"] and w["start"] < c["end"]]
-        idx = p["clips"].index(c) + 1
-        name = f"{safe_name(p.get('title', 'video'), 30)}_{idx:02d}_{safe_name(c.get('title', ''), 30)}"
+        # nama stabil: memakai id clip, bukan nomor urut yang bisa bergeser
+        name = f"{safe_name(p.get('title', 'video'), 30)}_{safe_name(c.get('title', ''), 30)}_{c['id'][:4]}"
         out_dir = os.path.join(OUTPUT, safe_name(p.get("title", pid), 50))
         os.makedirs(out_dir, exist_ok=True)
         out = os.path.join(out_dir, name + ".mp4")
 
         def prog(x):
-            ensure_alive(pid)  # hentikan render bila proyek dihapus
+            check_job(pid, c, token)  # hentikan render bila dibatalkan / proyek dihapus
             c["render_progress"] = round(x, 3)
 
         core.render_clip(os.path.join(pdir(pid), p["source"]), c["start"], c["end"], out, words,
@@ -262,59 +356,74 @@ def do_render(pid, cid):
         core.write_srt(words, c["start"], c["end"], out.rsplit(".", 1)[0] + ".srt")
         with open(out.rsplit(".", 1)[0] + "_caption.txt", "w", encoding="utf-8") as f:
             f.write((c.get("caption") or c.get("title", "")) + "\n\n" + " ".join(c.get("hashtags", [])))
-        c["file"] = os.path.relpath(out, OUTPUT).replace("\\", "/")
+        rel = os.path.relpath(out, OUTPUT).replace("\\", "/")
+        old = c.get("file")
+        if old and old != rel:  # judul berubah: buang hasil render lama clip ini
+            remove_later(remove_files(*output_files(old)))
+        c["file"] = rel
         c["render_status"], c["render_progress"] = "selesai", 1
     except Exception as e:
         if out:  # buang file sementara dari render yang tidak selesai
-            for leftover in (out + ".tmp.mp4", out + ".log"):
-                try:
-                    os.remove(leftover)
-                except OSError:
-                    pass
+            remove_files(out + ".tmp.mp4", out + ".log")
             try:
                 os.rmdir(os.path.dirname(out))  # hanya terhapus bila folder kosong
             except OSError:
                 pass
-        if pid not in projects:
+        if pid not in projects or c.get("job") != token:
             return
         traceback.print_exc()
         c["render_status"], c["error"] = "gagal", str(e)[:500]
     save_project(p)
 
 
-def worker():
+def worker(q, kind):
     while True:
-        kind, pid, cid = jobs.get()
+        job = q.get()
+        pid = job[0]
         try:
-            if pid not in projects:
-                continue
-            if kind == "analyze":
-                do_analyze(pid)
-            elif kind == "render":
-                do_render(pid, cid)
+            if pid in projects:
+                if kind == "analyze":
+                    do_analyze(pid, job[1])
+                else:
+                    do_render(pid, job[1], job[2])
         except Exception:
             traceback.print_exc()  # jangan sampai pekerja mati dan antrian macet
         finally:
             if pid not in projects:
                 # proyek dihapus saat diproses: sekarang file sudah tidak terkunci
                 shutil.rmtree(pdir(pid), ignore_errors=True)
-            jobs.task_done()
+            q.task_done()
+
+
+def queue_analyze(pid):
+    p = projects[pid]
+    with lock:
+        p["job"] = uuid.uuid4().hex
+        p["status"], p["stage"], p["progress"], p["error"] = "antri", "Menunggu giliran...", 0, ""
+    analyze_q.put((pid, p["job"]))
 
 
 def queue_render(pid, cid):
-    p = projects[pid]
-    c = next((x for x in p["clips"] if x["id"] == cid), None)
-    if c and c.get("render_status") not in ("antri", "proses"):
-        c["render_status"], c["render_progress"] = "antri", 0
-        jobs.put(("render", pid, cid))
+    p = projects.get(pid)
+    if not p or not p.get("source"):
+        return False
+    with lock:
+        c = next((x for x in p.get("clips", []) if x["id"] == cid), None)
+        if not c or c.get("render_status") in ("antri", "proses"):
+            return False
+        c["job"] = uuid.uuid4().hex
+        c["render_status"], c["render_progress"], c["error"] = "antri", 0, ""
+    render_q.put((pid, cid, c["job"]))
+    return True
 
 
-def new_project(url=None, source=None, title=None, n_clips=None, auto_render=False):
+def new_project(url=None, source=None, title=None, n_clips=None, auto_render=False, language=None):
     pid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     os.makedirs(pdir(pid), exist_ok=True)
     p = {"id": pid, "url": url, "source": source, "title": title or url or "Video",
          "status": "antri", "stage": "Menunggu giliran...", "progress": 0, "clips": [],
-         "created": time.time(), "n_clips": n_clips, "auto_render": auto_render, "error": ""}
+         "created": time.time(), "n_clips": n_clips, "auto_render": auto_render, "error": "",
+         "language": language if language in LANGUAGES else None}
     projects[pid] = p
     save_project(p)
     return p
@@ -330,9 +439,18 @@ def index():
 
 @app.get("/api/state")
 def state():
-    with lock:
-        items = sorted(projects.values(), key=lambda p: -p.get("created", 0))
-        return jsonify({"projects": items, "queue": jobs.qsize()})
+    for _ in range(5):
+        try:
+            with lock:
+                items = sorted(projects.values(), key=lambda p: -p.get("created", 0))
+                body = json.dumps({
+                    "projects": [{**p, "size_mb": dir_size_mb(pdir(p["id"]))} for p in items],
+                    "queue": analyze_q.qsize() + render_q.qsize(),
+                }, ensure_ascii=False)
+            return Response(body, mimetype="application/json")
+        except RuntimeError:  # pekerja sedang mengubah data clip; coba baca lagi
+            time.sleep(0.02)
+    return jsonify(error="Server sibuk, coba lagi."), 503
 
 
 @app.get("/api/settings")
@@ -340,6 +458,7 @@ def get_settings():
     s = load_settings()
     s["has_key"] = bool(s.get("api_key"))
     s["api_key"] = ""  # jangan kirim kunci ke halaman
+    s["gpu"] = {"device": core.transcribe_device(), "error": core.CUDA_ERROR}
     return jsonify(s)
 
 
@@ -353,7 +472,8 @@ def post_settings():
     if body.pop("clear_key", False):
         s["api_key"] = ""
     style = body.pop("style", None)
-    body.pop("has_key", None)
+    for k in ("has_key", "gpu"):
+        body.pop(k, None)
     s.update(body)
     if style:
         s["style"].update(style)
@@ -368,8 +488,9 @@ def add_links():
     if not links:
         return jsonify(error="Tidak ada link yang valid."), 400
     for url in links:
-        p = new_project(url=url, n_clips=body.get("n_clips"), auto_render=body.get("auto_render", False))
-        jobs.put(("analyze", p["id"], None))
+        p = new_project(url=url, n_clips=body.get("n_clips"), auto_render=body.get("auto_render", False),
+                        language=body.get("language"))
+        queue_analyze(p["id"])
     return jsonify(ok=True, count=len(links))
 
 
@@ -380,20 +501,20 @@ def upload():
         return jsonify(error="Tidak ada file."), 400
     title = os.path.splitext(f.filename)[0]
     p = new_project(title=title, n_clips=request.form.get("n_clips", type=int),
-                    auto_render=request.form.get("auto_render") == "true")
+                    auto_render=request.form.get("auto_render") == "true",
+                    language=request.form.get("language"))
     ext = os.path.splitext(f.filename)[1].lower() or ".mp4"
     f.save(os.path.join(pdir(p["id"]), "source" + ext))
     p["source"] = "source" + ext
     save_project(p)
-    jobs.put(("analyze", p["id"], None))
+    queue_analyze(p["id"])
     return jsonify(ok=True)
 
 
 @app.post("/api/project/<pid>/retry")
 def retry(pid):
     p = projects.get(pid) or abort(404)
-    p["status"], p["stage"], p["error"] = "antri", "Menunggu giliran...", ""
-    jobs.put(("analyze", pid, None))
+    queue_analyze(pid)
     return jsonify(ok=True)
 
 
@@ -401,11 +522,51 @@ def retry(pid):
 def reanalyze(pid):
     """Cari ulang momen (transkrip dipakai ulang, cepat)."""
     p = projects.get(pid) or abort(404)
+    if busy(p):
+        return jsonify(error="Tunggu render selesai atau batalkan dulu."), 409
     body = request.get_json(silent=True) or {}
     if body.get("n_clips"):
         p["n_clips"] = int(body["n_clips"])
-    p["status"], p["stage"] = "antri", "Menunggu giliran..."
-    jobs.put(("analyze", pid, None))
+    queue_analyze(pid)
+    return jsonify(ok=True)
+
+
+@app.post("/api/project/<pid>/cancel")
+def cancel(pid):
+    """Batalkan analisis dan/atau render. Body {cid} untuk satu clip saja."""
+    p = projects.get(pid) or abort(404)
+    cid = (request.get_json(silent=True) or {}).get("cid")
+    n = 0
+    with lock:
+        for c in p.get("clips", []):
+            if (cid is None or c["id"] == cid) and c.get("render_status") in ("antri", "proses"):
+                c["job"] = None
+                c["render_status"], c["render_progress"] = None, 0
+                n += 1
+        if cid is None and p.get("status") in ("antri", "proses"):
+            p["job"] = None
+            if p.get("clips"):
+                p["status"], p["stage"] = "siap", "Pencarian ulang dibatalkan."
+            else:
+                p["status"], p["stage"] = "gagal", "Dibatalkan. Klik Ulangi untuk memproses lagi."
+            n += 1
+    save_project(p)
+    return jsonify(ok=True, count=n)
+
+
+@app.post("/api/project/<pid>/drop-source")
+def drop_source(pid):
+    """Hapus video sumber untuk menghemat disk. Hasil render di folder output tetap aman."""
+    p = projects.get(pid) or abort(404)
+    with lock:
+        if busy(p):
+            return jsonify(error="Tunggu proses selesai atau batalkan dulu."), 409
+        src = p.get("source")
+        p["source"] = None
+        p["source_removed"] = True
+    paths = [os.path.join(pdir(pid), "audio.wav")] + ([os.path.join(pdir(pid), src)] if src else [])
+    remove_later(remove_files(*paths))
+    save_project(p)
     return jsonify(ok=True)
 
 
@@ -416,6 +577,8 @@ def delete_project(pid):
         if p:
             # file yang masih dipakai render akan dibersihkan pekerja setelah ia berhenti
             shutil.rmtree(pdir(pid), ignore_errors=True)
+            if os.path.exists(pdir(pid)) and not busy(p):
+                remove_later([pdir(pid)])  # mis. video masih terbuka di browser
     return jsonify(ok=True)
 
 
@@ -459,7 +622,11 @@ def upsert_clip(pid):
 @app.delete("/api/project/<pid>/clip/<cid>")
 def delete_clip(pid, cid):
     p = projects.get(pid) or abort(404)
-    p["clips"] = [c for c in p["clips"] if c["id"] != cid]
+    with lock:
+        for c in p["clips"]:
+            if c["id"] == cid:
+                c["job"] = None  # hentikan render clip ini bila sedang berjalan
+        p["clips"] = [c for c in p["clips"] if c["id"] != cid]
     save_project(p)
     return jsonify(ok=True)
 
@@ -467,25 +634,50 @@ def delete_clip(pid, cid):
 @app.post("/api/project/<pid>/render")
 def render(pid):
     p = projects.get(pid) or abort(404)
+    if not p.get("source"):
+        return jsonify(error="Video sumber sudah dihapus, clip tidak bisa dirender lagi."), 409
     body = request.get_json(silent=True) or {}
     ids = body.get("ids") or [c["id"] for c in p["clips"] if c.get("selected")]
     if body.get("style"):
         p["style"] = body["style"]
-    for cid in ids:
-        queue_render(pid, cid)
+    n = sum(1 for cid in ids if queue_render(pid, cid))
     save_project(p)
-    return jsonify(ok=True, count=len(ids))
+    return jsonify(ok=True, count=n)
 
 
 @app.post("/api/render-all")
 def render_all():
     n = 0
-    for pid, p in projects.items():
+    for pid, p in list(projects.items()):
         for c in p.get("clips", []):
-            if c.get("selected") and c.get("render_status") != "selesai":
-                queue_render(pid, c["id"])
+            if c.get("selected") and c.get("render_status") != "selesai" and queue_render(pid, c["id"]):
                 n += 1
     return jsonify(ok=True, count=n)
+
+
+@app.post("/api/preview-style")
+def preview_style():
+    """Satu frame contoh dengan gaya saat ini, supaya tidak perlu render ulang hanya untuk mencoba gaya."""
+    body = request.get_json(silent=True) or {}
+    s = load_settings()
+    style = {**s["style"], **(body.get("style") or {})}
+    pid = body.get("pid")
+    cands = [projects[pid]] if pid in projects else sorted(projects.values(), key=lambda x: -x.get("created", 0))
+    p = next((x for x in cands if x.get("status") == "siap" and x.get("source")
+              and os.path.exists(os.path.join(pdir(x["id"]), x["source"]))), None)
+    try:
+        if p:
+            clip = (p.get("clips") or [None])[0]
+            t = clip["start"] + 1.0 if clip else (p.get("duration") or 10) * 0.3
+            words = [w for w in all_words(segments_of(p)) if t - 0.05 <= w["start"] < t + 4]
+            title = (clip or {}).get("title") or p.get("title", "")
+            jpg = core.render_preview(os.path.join(pdir(p["id"]), p["source"]), t, words, style, title)
+        else:
+            jpg = core.render_preview(None, 0, [], style, "Contoh judul hook yang menarik")
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify(error=f"Pratinjau gagal: {e}"[:300]), 500
+    return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/media/<pid>/<path:name>")
@@ -527,7 +719,8 @@ def open_folder():
 
 if __name__ == "__main__":
     load_projects()
-    threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=worker, args=(analyze_q, "analyze"), daemon=True).start()
+    threading.Thread(target=worker, args=(render_q, "render"), daemon=True).start()
     port = int(os.environ.get("PORT", 7860))
     url = f"http://127.0.0.1:{port}"
     print("=" * 56)

@@ -5,22 +5,22 @@ Aplikasi pribadi untuk mengubah video panjang (dari link atau file) menjadi vide
 ## Instalasi (sekali saja)
 
 1. Ekstrak folder `ClipMaker` ke tempat yang mudah, misalnya `D:\ClipMaker`.
-2. Klik dua kali **install.bat**. Ia akan menginstal Python, FFmpeg, Deno (dibutuhkan untuk unduhan YouTube), paket yang diperlukan, dan model transkrip (sekitar 500 MB).
+2. Klik dua kali **install.bat**. Ia akan menginstal Python, FFmpeg, Deno (dibutuhkan untuk unduhan YouTube), paket yang diperlukan, dan model transkrip (sekitar 500 MB). Bila komputer punya kartu grafis NVIDIA, pustaka CUDA (sekitar 1 GB) ikut dipasang supaya transkrip jauh lebih cepat.
    - Jika muncul pesan "Python selesai diinstal", tutup jendelanya lalu jalankan **install.bat** sekali lagi.
 3. Selesai. Butuh koneksi internet dan ruang disk kurang lebih 3 GB.
 
 ## Cara pakai
 
 1. Klik dua kali **run.bat**. Browser akan terbuka di `http://127.0.0.1:7860`. Biarkan jendela hitam tetap terbuka selama memakai aplikasi.
-2. **Masukkan video**: tempel satu atau banyak link (satu per baris), atau tarik file video dari komputer. Tentukan jumlah clip, lalu tekan **Proses**.
-3. Aplikasi akan mengunduh, membuat transkrip, dan mencari momen paling menarik. Setiap momen diberi **skor** dan **alasan**.
+2. **Masukkan video**: tempel satu atau banyak link (satu per baris), atau tarik file video dari komputer. Tentukan jumlah clip dan **bahasa** yang diucapkan di video, lalu tekan **Proses**.
+3. Aplikasi akan mengunduh, membuat transkrip, dan mencari momen paling menarik. Setiap momen diberi **skor** dan **alasan**. Proses yang sedang berjalan bisa dihentikan dengan **✕ Batal**.
 4. Periksa daftar clip:
    - Ubah judul/hook (teks yang tampil di atas video).
    - Geser waktu mulai/selesai, atau pakai tombol −1 / +1 detik.
    - **Pratinjau** untuk menonton bagian aslinya.
    - **Transkrip** untuk memilih kalimat sendiri lalu menjadikannya clip.
    - Hapus centang clip yang tidak ingin dirender.
-5. Atur **Gaya video** (berlaku untuk semua render berikutnya), lalu tekan **Render**.
+5. Atur **Gaya video** (berlaku untuk semua render berikutnya). Tekan **👁 Pratinjau gaya** untuk melihat hasilnya di satu frame tanpa menunggu render. Lalu tekan **Render**. Analisis video lain tetap bisa berjalan bersamaan dengan render.
 6. Hasil muncul di daftar dan tersimpan di folder `output`. Untuk setiap clip ada:
    - `.mp4` video 1080×1920 siap upload
    - `.srt` subtitle terpisah
@@ -28,12 +28,16 @@ Aplikasi pribadi untuk mengubah video panjang (dari link atau file) menjadi vide
 
 Centang **Langsung render otomatis** bila ingin semua momen langsung dijadikan video tanpa diperiksa dulu.
 
+Setelah semua clip selesai, tekan **🧹 Hapus video sumber** untuk menghemat disk (video asli bisa ratusan MB). Hasil render tetap aman, tetapi clip proyek itu tidak bisa dirender ulang.
+
 ## Fitur
 
 - Deteksi momen menarik otomatis (hook kalimat pembuka, pertanyaan, kata kunci emosional, energi suara, kepadatan bicara)
 - Subtitle otomatis gaya TikTok: 1–4 kata per tampilan, kata yang diucapkan disorot warna, efek muncul
 - Crop pintar 9:16 mengikuti wajah pembicara dengan gerakan kamera halus
+- Tata letak **Dua orang (atas/bawah)** untuk podcast/wawancara: tiap orang mendapat setengah layar (dipilih otomatis bila terdeteksi dua wajah berdampingan)
 - Tata letak alternatif: video utuh dengan latar blur, atau potong tengah
+- Transkrip di GPU NVIDIA bila tersedia (otomatis kembali ke CPU bila gagal)
 - Judul/hook di atas video, progress bar, watermark @akun
 - Volume suara diratakan sesuai standar media sosial
 - Proses banyak link sekaligus dengan antrian
@@ -49,9 +53,9 @@ Tanpa pengaturan apa pun, momen dipilih oleh algoritma lokal (gratis). Untuk pem
 |---|---|
 | Unduhan YouTube gagal / "confirm you're not a bot" | Di **Pengaturan**, isi "Ambil cookies dari browser" dengan browser tempat Anda login YouTube (chrome/edge/firefox). Tutup browser itu saat mengunduh. |
 | Unduhan tiba-tiba gagal padahal dulu bisa | Jalankan **update.bat** (situs video sering berubah). |
-| Transkrip lambat | Di **Pengaturan**, ganti model transkrip ke **base**. Jika punya kartu grafis NVIDIA, model **medium/large-v3** akan berjalan cepat. |
-| Subtitle kurang tepat | Pakai model **medium**, dan pastikan "Bahasa video" sudah benar. |
-| Wajah tidak diikuti | Pilih tata letak **Ikuti wajah**, atau **Video utuh + latar blur** untuk video dengan banyak orang. |
+| Transkrip lambat | Lihat baris di bawah tombol Proses: bila tertulis "memakai CPU" padahal ada kartu NVIDIA, jalankan **install.bat** lagi. Atau di **Pengaturan** ganti model transkrip ke **base**. Dengan GPU, model **medium/large-v3** pun berjalan cepat. |
+| Subtitle kurang tepat / malah diterjemahkan | Pastikan pilihan **Bahasa** saat menambahkan video sesuai bahasa yang diucapkan (atau pilih Deteksi otomatis), dan pakai model **medium**. |
+| Wajah tidak diikuti | Pilih tata letak **Ikuti wajah**, **Dua orang (atas/bawah)** untuk podcast, atau **Video utuh + latar blur** untuk video dengan banyak orang. |
 
 Gunakan aplikasi ini untuk video milik Anda sendiri atau yang Anda punya izin untuk mengunggah ulang.
 
@@ -60,6 +64,7 @@ Gunakan aplikasi ini untuk video milik Anda sendiri atau yang Anda punya izin un
 ```
 ClipMaker/
   install.bat, run.bat, update.bat
+  requirements*.txt daftar paket (lock = versi yang sudah teruji, gpu = pustaka CUDA)
   app.py            server web lokal
   clipper_core.py   mesin unduh, transkrip, deteksi momen, render
   web/index.html    tampilan aplikasi

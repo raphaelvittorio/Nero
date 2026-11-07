@@ -174,6 +174,43 @@ def audio_energy(wav_path: str, hop: float = 0.5) -> np.ndarray:
 # --------------------------------------------------------------------------
 _WHISPER = {}
 _CUDA_BROKEN = False
+CUDA_ERROR = ""  # alasan GPU tidak dipakai (ditampilkan di halaman)
+
+
+def _register_cuda_dlls() -> None:
+    """Pustaka CUDA dari paket pip nvidia-cublas-cu12 / nvidia-cudnn-cu12 tidak otomatis
+    masuk PATH di Windows, jadi daftarkan foldernya sebelum ctranslate2 memuatnya."""
+    if os.name != "nt":
+        return
+    try:
+        import nvidia  # paket namespace milik nvidia-*-cu12
+    except ImportError:
+        return
+    for base in list(getattr(nvidia, "__path__", [])):
+        for sub in sorted(os.listdir(base)):
+            b = os.path.join(base, sub, "bin")
+            if os.path.isdir(b):
+                os.environ["PATH"] = b + os.pathsep + os.environ.get("PATH", "")
+                try:
+                    os.add_dll_directory(b)
+                except OSError:
+                    pass
+
+
+_register_cuda_dlls()
+
+
+def transcribe_device() -> str:
+    """'cuda' bila kartu NVIDIA terdeteksi dan belum terbukti gagal, selain itu 'cpu'."""
+    if _CUDA_BROKEN:
+        return "cpu"
+    try:
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() > 0:
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
 
 
 def _whisper_model(model_size: str, device: str):
@@ -188,26 +225,32 @@ def _whisper_model(model_size: str, device: str):
 def transcribe(wav_path: str, model_size: str = "small", language: str | None = None,
                progress=None) -> list[dict]:
     """Hasil: daftar segmen {start, end, text, words:[{start,end,word}]}"""
-    global _CUDA_BROKEN
-    device = "cpu"
-    if not _CUDA_BROKEN:
-        try:
-            import ctranslate2
-            if ctranslate2.get_cuda_device_count() > 0:
-                device = "cuda"
-        except Exception:
-            pass
+    global _CUDA_BROKEN, CUDA_ERROR
+    device = transcribe_device()
 
     # baca WAV sendiri (16 kHz mono) supaya tidak bergantung pada versi PyAV
     with wave.open(wav_path, "rb") as wf:
         audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
 
     if device == "cuda":
+        cb_errors = []
+
+        def guarded(x):
+            try:
+                if progress:
+                    progress(x)
+            except BaseException as e:  # mis. dibatalkan pengguna: jangan dianggap GPU rusak
+                cb_errors.append(e)
+                raise
+
         try:
-            return _transcribe_with(_whisper_model(model_size, "cuda"), audio, language, progress)
-        except Exception:
-            # Kartu NVIDIA ada, tapi pustaka CUDA (cuBLAS/cuDNN) tidak terpasang -> pakai CPU
+            return _transcribe_with(_whisper_model(model_size, "cuda"), audio, language, guarded)
+        except Exception as e:
+            if cb_errors:
+                raise
+            # Kartu NVIDIA ada, tapi pustaka CUDA (cuBLAS/cuDNN) tidak bisa dimuat -> pakai CPU
             _CUDA_BROKEN = True
+            CUDA_ERROR = str(e)[:300]
             _WHISPER.pop((model_size, "cuda"), None)
     return _transcribe_with(_whisper_model(model_size, "cpu"), audio, language, progress)
 
@@ -388,18 +431,51 @@ def find_highlights_heuristic(segments, energy, n_clips=5, min_len=20, max_len=6
     return out
 
 
-def find_highlights_ai(segments, api_key, n_clips=5, min_len=20, max_len=60,
-                       model="claude-sonnet-5-5", video_title="") -> list[dict]:
-    """Memakai Claude API untuk memilih momen paling 'viral'."""
-    import requests
+# Struktur jawaban yang dijamin API (structured outputs), jadi tidak perlu menebak JSON dari teks.
+CLIP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "clips": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "number", "description": "detik mulai"},
+                    "end": {"type": "number", "description": "detik selesai"},
+                    "title": {"type": "string", "description": "judul hook singkat, maks 8 kata"},
+                    "score": {"type": "integer", "description": "potensi viral 0-100"},
+                    "reason": {"type": "string", "description": "alasan singkat"},
+                    "caption": {"type": "string", "description": "caption postingan 1-2 kalimat"},
+                    "hashtags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["start", "end", "title", "score", "reason", "caption", "hashtags"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["clips"],
+    "additionalProperties": False,
+}
+# Model yang mendukung fallback otomatis di server bila permintaan ditolak pengaman.
+FALLBACK_MODELS = {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
+AI_TRANSCRIPT_LIMIT = 800_000  # karakter (~200 ribu token): cukup untuk video beberapa jam
 
-    lines, total = [], 0
+
+def find_highlights_ai(segments, api_key, n_clips=5, min_len=20, max_len=60,
+                       model="claude-sonnet-5-5", video_title="") -> tuple[list[dict], str]:
+    """Memakai Claude API untuk memilih momen paling 'viral'.
+    Hasil: (daftar clip, catatan untuk pengguna atau "")."""
+    import anthropic
+
+    lines, total, cut_at = [], 0, None
     for s in segments:
         line = f"[{s['start']:.1f}-{s['end']:.1f}] {s['text']}"
-        total += len(line)
-        if total > 180_000:
+        total += len(line) + 1
+        if total > AI_TRANSCRIPT_LIMIT:
+            cut_at = s["start"]
             break
         lines.append(line)
+    note = (f"Transkrip sangat panjang: AI hanya membaca sampai menit {cut_at / 60:.0f}." if cut_at else "")
     prompt = f"""Kamu adalah editor video pendek (TikTok/Reels/Shorts) yang sangat paham konten viral.
 Berikut transkrip video "{video_title}" dengan waktu dalam detik.
 
@@ -410,24 +486,44 @@ Pilih {n_clips} potongan terbaik untuk dijadikan video pendek. Aturan:
 - Mulai tepat di awal kalimat yang langsung menarik perhatian (hook kuat di 3 detik pertama).
 - Akhiri di akhir kalimat/gagasan yang tuntas.
 - Potongan harus bisa dipahami tanpa menonton video aslinya.
-Balas HANYA dengan JSON array, tanpa teks lain, format:
-[{{"start": 12.3, "end": 48.9, "title": "judul hook singkat maks 8 kata", "score": 0-100, "reason": "alasan singkat", "caption": "caption postingan 1-2 kalimat", "hashtags": ["#a", "#b"]}}]
+- title: judul hook singkat (maks 8 kata) yang tampil di atas video.
+- caption: caption postingan 1-2 kalimat; hashtags: 3-8 hashtag relevan.
 Gunakan bahasa yang sama dengan bahasa transkrip."""
-    r = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
-                 "content-type": "application/json"},
-        json={"model": model, "max_tokens": 4000,
-              "messages": [{"role": "user", "content": prompt}]},
-        timeout=180,
-    )
-    if r.status_code != 200:
-        raise RuntimeError(f"Claude API error {r.status_code}: {r.text[:300]}")
-    text = "".join(b.get("text", "") for b in r.json().get("content", []))
-    m = re.search(r"\[.*\]", text, re.S)
-    if not m:
-        raise RuntimeError("Jawaban AI tidak berisi JSON.")
-    clips = json.loads(m.group(0))
+
+    client = anthropic.Anthropic(api_key=api_key, max_retries=3)
+    params = {
+        "model": model,
+        "max_tokens": 16000,
+        "messages": [{"role": "user", "content": prompt}],
+        "output_config": {"format": {"type": "json_schema", "schema": CLIP_SCHEMA}},
+    }
+    try:
+        if model in FALLBACK_MODELS:
+            resp = client.beta.messages.create(betas=["server-side-fallback-2026-07-01"],
+                                               fallbacks="default", **params)
+        else:
+            resp = client.messages.create(**params)
+    except anthropic.AuthenticationError as e:
+        raise RuntimeError("Claude API key tidak valid.") from e
+    except anthropic.PermissionDeniedError as e:
+        raise RuntimeError("API key tidak punya akses ke model ini.") from e
+    except anthropic.NotFoundError as e:
+        raise RuntimeError(f"Model AI '{model}' tidak ditemukan. Periksa nama model di Pengaturan.") from e
+    except anthropic.RateLimitError as e:
+        raise RuntimeError("Batas pemakaian Claude API tercapai, coba lagi nanti.") from e
+    except anthropic.APIStatusError as e:
+        raise RuntimeError(f"Claude API error {e.status_code}: {e.message}"[:300]) from e
+    except anthropic.APIConnectionError as e:
+        raise RuntimeError("Tidak bisa terhubung ke Claude API. Periksa koneksi internet.") from e
+
+    if resp.stop_reason == "refusal":
+        raise RuntimeError("AI menolak memproses transkrip ini.")
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError("Jawaban AI terpotong.")
+    texts = [b.text for b in resp.content if b.type == "text"]
+    if not texts:
+        raise RuntimeError("Jawaban AI kosong.")
+    clips = json.loads(texts[-1])["clips"]  # blok teks terakhir = jawaban model yang selesai
 
     starts = [s["start"] for s in segments]
     ends = [s["end"] for s in segments]
@@ -438,17 +534,22 @@ Gunakan bahasa yang sama dengan bahasa transkrip."""
         en = min(ends, key=lambda x: abs(x - en))
         if en - st < 5:
             continue
+        try:
+            score = max(0, min(100, int(round(float(c.get("score", 70))))))
+        except (TypeError, ValueError):
+            score = 70
         out.append({
             "start": round(st, 2), "end": round(en, 2),
             "title": str(c.get("title", ""))[:90],
-            "score": int(c.get("score", 70)),
+            "score": score,
             "reason": str(c.get("reason", "")),
             "caption": str(c.get("caption", "")),
-            "hashtags": [h if h.startswith("#") else "#" + h for h in c.get("hashtags", [])][:8],
+            "hashtags": [h if h.startswith("#") else "#" + h
+                         for h in (str(x).strip().replace(" ", "") for x in c.get("hashtags", [])) if h][:8],
             "text": " ".join(s["text"] for s in segments if s["start"] >= st - 0.1 and s["end"] <= en + 0.1),
         })
     out.sort(key=lambda c: c["start"])
-    return out
+    return out, note
 
 
 # --------------------------------------------------------------------------
@@ -656,8 +757,8 @@ def _handle_image(text: str) -> np.ndarray:
     return np.array(img)
 
 
-def track_faces(src, start, dur, info: VideoInfo, sample_fps=3.0) -> list[tuple[float, float | None]]:
-    """Kembalikan [(waktu, posisi_x_tengah_wajah 0..1 atau None)]."""
+def track_faces(src, start, dur, info: VideoInfo, sample_fps=3.0) -> list[tuple[float, list]]:
+    """Kembalikan [(waktu, [(cx, cy, w, h), ...])]: semua wajah (0..1), terbesar lebih dulu."""
     import cv2
     det_w = 480
     det_h = int(round(info.height * det_w / info.width / 2)) * 2
@@ -692,14 +793,13 @@ def track_faces(src, start, dur, info: VideoInfo, sample_fps=3.0) -> list[tuple[
         buf = p.stdout.read(n)
         if len(buf) < n:
             break
-        x = None
+        faces = []
         if detect:
             img = np.frombuffer(buf, np.uint8).reshape(det_h, det_w, 3)
-            faces = detect(img)
-            if len(faces):
-                fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])  # wajah terbesar = pembicara
-                x = float(fx + fw / 2) / det_w
-        res.append((i / sample_fps, x))
+            faces = sorted(((float(fx + fw / 2) / det_w, float(fy + fh / 2) / det_h,
+                             float(fw) / det_w, float(fh) / det_h) for fx, fy, fw, fh in detect(img)),
+                           key=lambda f: -f[2] * f[3])
+        res.append((i / sample_fps, faces))
         i += 1
     p.wait()
     return res
@@ -735,46 +835,155 @@ def _smooth_track(track, n_frames, fps):
     return out
 
 
+def _two_people(track) -> bool:
+    """Dua wajah berdampingan (podcast/wawancara) di sebagian besar potongan?"""
+    if not track:
+        return False
+    hits = 0
+    for _, faces in track:
+        if len(faces) >= 2:
+            a, b = faces[0], faces[1]
+            if b[2] * b[3] >= 0.35 * a[2] * a[3] and abs(a[0] - b[0]) > 0.15:
+                hits += 1
+    return hits >= max(2, 0.5 * len(track))
+
+
+def _split_tracks(track, n_frames, fps):
+    """Jalur kamera orang kiri & kanan: [(xs, ys), (xs, ys)] per frame, atau None."""
+    sides, last = [[], []], [None, None]
+    for t, faces in track:
+        pts = [None, None]
+        if len(faces) >= 2:
+            a, b = sorted(faces[:2], key=lambda f: f[0])
+            pts = [(a[0], a[1]), (b[0], b[1])]
+        elif len(faces) == 1 and last[0] and last[1]:
+            f = faces[0]  # satu wajah saja: tempelkan ke sisi yang posisinya terdekat
+            k = 0 if abs(f[0] - last[0][0]) <= abs(f[0] - last[1][0]) else 1
+            pts[k] = (f[0], f[1])
+        for k in (0, 1):
+            if pts[k]:
+                last[k] = pts[k]
+            sides[k].append((t, pts[k]))
+    out = []
+    for side in sides:
+        xs = _smooth_track([(t, p[0] if p else None) for t, p in side], n_frames, fps)
+        ys = _smooth_track([(t, p[1] if p else None) for t, p in side], n_frames, fps)
+        if xs is None or ys is None:
+            return None
+        out.append((xs, ys))
+    return out
+
+
+def _decode_size(info: VideoInfo) -> tuple[int, int]:
+    """Ukuran decode: sisi pendek maks 1080 px supaya cepat.
+    (Dulu tinggi dibatasi 1080, sehingga video vertikal 1080x1920 ikut dikecilkan lalu diperbesar lagi.)"""
+    sw, sh = info.width, info.height
+    short = min(sw, sh)
+    if short > 1080:
+        k = 1080 / short
+        sw, sh = int(round(sw * k / 2)) * 2, int(round(sh * k / 2)) * 2
+    return sw, sh
+
+
+def _plan_layout(src, start, dur, info, style, sw, sh, n_frames, fps):
+    """Tentukan tata letak & jalur kamera. Hasil: (layout, cam, split)."""
+    if sh >= sw:
+        return "fill", None, None  # video sudah vertikal
+    layout = style.get("layout", "auto")
+    if layout not in ("auto", "face", "split"):
+        return layout, None, None  # blur / center
+    track = track_faces(src, start, dur, info)
+    if layout in ("auto", "split") and _two_people(track):
+        split = _split_tracks(track, n_frames, fps)
+        if split:
+            return "split", None, split
+    single = [(t, faces[0][0] if faces else None) for t, faces in track]  # wajah terbesar
+    found = sum(1 for _, x in single if x is not None)
+    cam = _smooth_track(single, n_frames, fps) if found >= max(2, len(single) * 0.25) else None
+    if cam is not None:
+        return "face", cam, None
+    return ("center" if layout == "face" else "blur"), None, None
+
+
+class FrameComposer:
+    """Menyusun satu frame 1080x1920: tata letak + judul + subtitle + watermark + progress bar.
+    Dipakai oleh render penuh maupun pratinjau gaya, jadi hasil keduanya selalu sama."""
+
+    def __init__(self, sw, sh, layout, cam, split, style, words, title, n_frames):
+        self.sw, self.sh, self.layout, self.cam, self.split = sw, sh, layout, cam, split
+        self.n_frames = max(1, n_frames)
+        cap_style = dict(style)
+        if layout == "split":
+            cap_style["caption_pos"] = 0.5  # di garis tengah, tidak menutupi wajah
+        self.cap = CaptionRenderer(words, cap_style) if style.get("captions", True) and words else None
+        self.title_img = _title_image(title, style) if style.get("title_on", True) and title.strip() else None
+        self.title_secs = float(style.get("title_secs", 0) or 0)  # 0 = sepanjang video
+        handle = (style.get("handle") or "").strip()
+        self.handle_img = _handle_image(handle) if handle else None
+        self.bar_on = style.get("progress_bar", True)
+        self.bar_color = CAPTION_COLORS.get(style.get("caption_color", "kuning"), (255, 221, 0))[::-1]
+        self.crop_w = min(sw, int(sh * 9 / 16))
+        self.fg_h = int(OUT_W * sh / sw)
+        self.half = OUT_H // 2
+        self.split_cw = int(min(sw * 0.5, sh * OUT_W / self.half))
+        self.split_ch = int(self.split_cw * self.half / OUT_W)
+
+    def frame(self, f, i, t=None):
+        import cv2
+        t = i / OUT_FPS if t is None else t
+        sw, sh = self.sw, self.sh
+        if self.layout in ("face", "center"):
+            cx = self.cam[min(i, len(self.cam) - 1)] if self.cam is not None else 0.5
+            x0 = int(np.clip(cx * sw - self.crop_w / 2, 0, sw - self.crop_w))
+            out = cv2.resize(f[:, x0:x0 + self.crop_w], (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
+        elif self.layout == "fill":
+            scale = max(OUT_W / sw, OUT_H / sh)
+            rw, rh = int(sw * scale + 0.5), int(sh * scale + 0.5)
+            r = cv2.resize(f, (rw, rh), interpolation=cv2.INTER_LINEAR)
+            xo, yo = (rw - OUT_W) // 2, (rh - OUT_H) // 2
+            out = np.ascontiguousarray(r[yo:yo + OUT_H, xo:xo + OUT_W])
+        elif self.layout == "split":  # dua orang: atas = kiri, bawah = kanan
+            out = np.empty((OUT_H, OUT_W, 3), np.uint8)
+            for k, (xs, ys) in enumerate(self.split):
+                j = min(i, len(xs) - 1)
+                x0 = int(np.clip(xs[j] * sw - self.split_cw / 2, 0, sw - self.split_cw))
+                y0 = int(np.clip(ys[j] * sh - self.split_ch * 0.45, 0, sh - self.split_ch))
+                part = f[y0:y0 + self.split_ch, x0:x0 + self.split_cw]
+                out[k * self.half:(k + 1) * self.half] = cv2.resize(
+                    part, (OUT_W, self.half), interpolation=cv2.INTER_LINEAR)
+            out[self.half - 3:self.half + 3] = 0  # garis pemisah
+        else:  # blur: video utuh di tengah, latar belakang buram
+            small = cv2.resize(f, (OUT_W // 8, OUT_H // 8), interpolation=cv2.INTER_AREA)
+            small = cv2.GaussianBlur(small, (0, 0), 6)
+            out = cv2.resize(small, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
+            out = (out * 0.55).astype(np.uint8)
+            fg = cv2.resize(f, (OUT_W, self.fg_h), interpolation=cv2.INTER_AREA)
+            y0 = (OUT_H - self.fg_h) // 2
+            out[y0:y0 + self.fg_h] = fg
+
+        if self.title_img is not None and (self.title_secs <= 0 or t < self.title_secs):
+            _blend(out, self.title_img, (OUT_W - self.title_img.shape[1]) // 2, int(OUT_H * 0.11))
+        if self.handle_img is not None:
+            _blend(out, self.handle_img, (OUT_W - self.handle_img.shape[1]) // 2, int(OUT_H * 0.84))
+        if self.cap:
+            self.cap.draw(out, t)
+        if self.bar_on:
+            bw = int(OUT_W * min(1.0, (i + 1) / self.n_frames))
+            out[OUT_H - 14:OUT_H, :bw] = self.bar_color
+        return out
+
+
 def render_clip(src: str, start: float, end: float, out_path: str, words: list[dict],
                 style: dict, title: str = "", progress=None) -> str:
-    import cv2
-
     info = probe(src)
     dur = max(0.5, end - start)
     fps = OUT_FPS
     n_frames = int(dur * fps)
-
-    # ukuran decode (batasi 1080p supaya cepat)
-    sw, sh = info.width, info.height
-    if sh > 1080:
-        sw, sh = int(round(sw * 1080 / sh / 2)) * 2, 1080
-
-    layout = style.get("layout", "auto")
-    is_vertical = sh >= sw
-    cam = None
-    if layout in ("auto", "face") and not is_vertical:
-        track = track_faces(src, start, dur, info)
-        found = sum(1 for _, x in track if x is not None)
-        if found >= max(2, len(track) * 0.25):
-            cam = _smooth_track(track, n_frames, fps)
-        if cam is None and layout == "auto":
-            layout = "blur"
-        elif cam is None:
-            layout = "center"
-        else:
-            layout = "face"
-    if is_vertical:
-        layout = "fill"
-
-    # overlay statis
-    cap = CaptionRenderer([{"start": w["start"] - start, "end": w["end"] - start, "word": w["word"]}
-                           for w in words], style) if style.get("captions", True) and words else None
-    title_img = _title_image(title, style) if style.get("title_on", True) and title.strip() else None
-    title_secs = float(style.get("title_secs", 0) or 0)  # 0 = sepanjang video
-    handle = style.get("handle", "").strip()
-    handle_img = _handle_image(handle) if handle else None
-    bar_on = style.get("progress_bar", True)
-    bar_color = CAPTION_COLORS.get(style.get("caption_color", "kuning"), (255, 221, 0))[::-1]
+    sw, sh = _decode_size(info)
+    layout, cam, split = _plan_layout(src, start, dur, info, style, sw, sh, n_frames, fps)
+    comp = FrameComposer(sw, sh, layout, cam, split, style,
+                         [{"start": w["start"] - start, "end": w["end"] - start, "word": w["word"]}
+                          for w in words], title, n_frames)
 
     dec = subprocess.Popen(
         [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}", "-i", src,
@@ -795,8 +1004,6 @@ def render_clip(src: str, start: float, end: float, out_path: str, words: list[d
     with open(err_path, "wb") as errf:
         enc = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE, stderr=errf, **_popen_kwargs())
         frame_bytes = sw * sh * 3
-        crop_w = int(sh * 9 / 16)
-        fg_h = int(OUT_W * sh / sw)
         i = 0
         try:
             while i < n_frames:
@@ -804,37 +1011,7 @@ def render_clip(src: str, start: float, end: float, out_path: str, words: list[d
                 if len(buf) < frame_bytes:
                     break
                 f = np.frombuffer(buf, np.uint8).reshape(sh, sw, 3)
-                t = i / fps
-
-                if layout == "face" or layout == "center":
-                    cx = cam[min(i, len(cam) - 1)] if cam is not None else 0.5
-                    x0 = int(np.clip(cx * sw - crop_w / 2, 0, sw - crop_w))
-                    out = cv2.resize(f[:, x0:x0 + crop_w], (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
-                elif layout == "fill":
-                    scale = max(OUT_W / sw, OUT_H / sh)
-                    rw, rh = int(sw * scale + 0.5), int(sh * scale + 0.5)
-                    r = cv2.resize(f, (rw, rh), interpolation=cv2.INTER_LINEAR)
-                    xo, yo = (rw - OUT_W) // 2, (rh - OUT_H) // 2
-                    out = np.ascontiguousarray(r[yo:yo + OUT_H, xo:xo + OUT_W])
-                else:  # blur: video utuh di tengah, latar belakang buram
-                    small = cv2.resize(f, (OUT_W // 8, OUT_H // 8), interpolation=cv2.INTER_AREA)
-                    small = cv2.GaussianBlur(small, (0, 0), 6)
-                    out = cv2.resize(small, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
-                    out = (out * 0.55).astype(np.uint8)
-                    fg = cv2.resize(f, (OUT_W, fg_h), interpolation=cv2.INTER_AREA)
-                    y0 = (OUT_H - fg_h) // 2
-                    out[y0:y0 + fg_h] = fg
-
-                if title_img is not None and (title_secs <= 0 or t < title_secs):
-                    _blend(out, title_img, (OUT_W - title_img.shape[1]) // 2, int(OUT_H * 0.11))
-                if handle_img is not None:
-                    _blend(out, handle_img, (OUT_W - handle_img.shape[1]) // 2, int(OUT_H * 0.84))
-                if cap:
-                    cap.draw(out, t)
-                if bar_on:
-                    bw = int(OUT_W * (i + 1) / n_frames)
-                    out[OUT_H - 14:OUT_H, :bw] = bar_color
-                enc.stdin.write(out.tobytes())
+                enc.stdin.write(comp.frame(f, i).tobytes())
                 i += 1
                 if progress and i % 15 == 0:
                     progress(i / n_frames)
@@ -861,6 +1038,45 @@ def render_clip(src: str, start: float, end: float, out_path: str, words: list[d
     except Exception:
         pass
     return out_path
+
+
+SAMPLE_WORDS = [{"start": 0.0, "end": 0.4, "word": "Contoh"}, {"start": 0.4, "end": 0.8, "word": "subtitle"},
+                {"start": 0.8, "end": 1.2, "word": "keren"}]
+
+
+def render_preview(src: str | None, t: float, words: list[dict], style: dict, title: str = "") -> bytes:
+    """Satu frame contoh (JPEG 540x960) dengan gaya saat ini, tanpa merender video."""
+    import cv2
+    if src:
+        info = probe(src)
+        t = max(0.0, min(t, max(0.0, info.duration - 0.5)))
+        sw, sh = _decode_size(info)
+        r = subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", src,
+                            "-frames:v", "1", "-vf", f"scale={sw}:{sh}", "-f", "rawvideo",
+                            "-pix_fmt", "bgr24", "-"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_popen_kwargs())
+        if len(r.stdout) < sw * sh * 3:
+            raise RuntimeError("Tidak bisa mengambil frame dari video.")
+        f = np.frombuffer(r.stdout[:sw * sh * 3], np.uint8).reshape(sh, sw, 3)
+        win = min(4.0, max(0.5, info.duration - t))
+        layout, cam, split = _plan_layout(src, t, win, info, style, sw, sh, 1, OUT_FPS)
+    else:  # belum ada video: latar gradasi
+        sw, sh = 1920, 1080
+        gx = np.linspace(0, 1, sw, dtype=np.float32)[None, :, None]
+        gy = np.linspace(0, 1, sh, dtype=np.float32)[:, None, None]
+        f = np.concatenate([np.broadcast_to(90 + 120 * gx, (sh, sw, 1)),
+                            np.broadcast_to(60 + 80 * gy, (sh, sw, 1)),
+                            np.broadcast_to(140 - 60 * gx, (sh, sw, 1))], axis=2).astype(np.uint8)
+        lay = style.get("layout", "auto")
+        layout, cam, split = ("blur" if lay in ("auto", "face", "split") else lay), None, None
+    rel = [{"start": w["start"] - t, "end": w["end"] - t, "word": w["word"]} for w in words] or SAMPLE_WORDS
+    tt = (rel[1] if len(rel) > 1 else rel[0])["start"] + 0.1  # kata ke-2 sedang disorot
+    out = FrameComposer(sw, sh, layout, cam, split, style, rel, title, 100).frame(f, 34, t=tt)
+    small = cv2.resize(out, (OUT_W // 2, OUT_H // 2), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    if not ok:
+        raise RuntimeError("Gagal membuat gambar pratinjau.")
+    return buf.tobytes()
 
 
 def write_srt(words, start, end, path, per_line=6):

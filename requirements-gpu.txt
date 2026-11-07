@@ -1,0 +1,4 @@
+# Hanya untuk komputer dengan kartu NVIDIA: pustaka CUDA 12 agar transkrip berjalan di GPU.
+# Tanpa ini aplikasi tetap jalan memakai CPU (lebih lambat).
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.28.1.4

@@ -101,6 +101,10 @@ a.btn{text-decoration:none}
 .tline b{font-variant-numeric:tabular-nums;color:var(--accent);font-weight:600;min-width:62px}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 18px;border-radius:10px;font-weight:600;opacity:0;transition:.25s;z-index:30;pointer-events:none}
 .toast.on{opacity:1}
+.sprev{display:flex;flex-direction:column;align-items:center;gap:6px;margin-top:14px}
+.sprev[hidden]{display:none}
+.sprev img{width:220px;max-width:100%;aspect-ratio:9/16;object-fit:cover;border-radius:12px;background:#000;border:1px solid var(--line)}
+.sprev img.loading{opacity:.45}
 </style>
 </head>
 <body>
@@ -123,6 +127,11 @@ a.btn{text-decoration:none}
         <label class="chk small">Jumlah clip
           <input type="number" id="nclips" min="1" max="20" value="5" style="width:70px">
         </label>
+        <label class="chk small">Bahasa
+          <select id="lang" style="width:auto" title="Bahasa yang diucapkan di video">
+            <option value="id">Indonesia</option><option value="en">Inggris</option><option value="auto">Deteksi otomatis</option><option value="ms">Melayu</option><option value="jv">Jawa</option>
+          </select>
+        </label>
         <label class="chk small"><input type="checkbox" id="autorender"> Langsung render otomatis</label>
         <div class="grow"></div>
         <button class="btn primary" id="go" onclick="submitLinks()">Proses ▸</button>
@@ -134,6 +143,14 @@ a.btn{text-decoration:none}
       <details id="styleBox" open>
         <summary>2. Gaya video</summary>
         <div class="form" id="styleForm"></div>
+        <div class="row" style="margin-top:14px">
+          <button class="btn sm" id="prevBtn" onclick="togglePreview()">👁 Pratinjau gaya</button>
+          <span class="small muted">Lihat hasilnya di satu frame tanpa render.</span>
+        </div>
+        <div class="sprev" id="stylePrev" hidden>
+          <img id="styleImg" alt="Pratinjau gaya video">
+          <span class="small muted" id="styleInfo"></span>
+        </div>
       </details>
     </section>
   </div>
@@ -216,7 +233,7 @@ function parseT(v){v=String(v).trim().replace(',','.');if(!v.includes(':'))retur
 
 /* ---------------- gaya ---------------- */
 const STYLE_FIELDS = [
-  ['layout','Tata letak','select',[['auto','Otomatis (wajah / blur)'],['face','Ikuti wajah'],['blur','Video utuh + latar blur'],['center','Potong tengah']]],
+  ['layout','Tata letak','select',[['auto','Otomatis (wajah / dua orang / blur)'],['face','Ikuti wajah'],['split','Dua orang (atas/bawah)'],['blur','Video utuh + latar blur'],['center','Potong tengah']]],
   ['captions','Subtitle otomatis','bool'],
   ['caption_color','Warna sorotan kata','color'],
   ['caption_words','Kata per tampilan','select',[[1,'1 kata (cepat)'],[2,'2 kata'],[3,'3 kata'],[4,'4 kata']]],
@@ -243,15 +260,36 @@ function buildStyle(){
     f.appendChild(w);
   }
 }
-async function setStyle(k,v){SETTINGS.style[k]=v;await api('/api/settings',{method:'POST',body:{style:{[k]:v}}});toast('Gaya disimpan')}
+async function setStyle(k,v){SETTINGS.style[k]=v;await api('/api/settings',{method:'POST',body:{style:{[k]:v}}});toast('Gaya disimpan');
+  if(!$('#stylePrev').hidden){clearTimeout(setStyle._t);setStyle._t=setTimeout(refreshPreview,250)}}
+
+/* pratinjau gaya: satu frame dari video terbaru (atau latar contoh) */
+function togglePreview(){const box=$('#stylePrev');box.hidden=!box.hidden;$('#prevBtn').textContent=box.hidden?'👁 Pratinjau gaya':'✕ Tutup pratinjau';if(!box.hidden)refreshPreview()}
+async function refreshPreview(){
+  const img=$('#styleImg'), info=$('#styleInfo'), seq=(refreshPreview._n=(refreshPreview._n||0)+1);
+  img.classList.add('loading'); info.textContent='Membuat pratinjau...';
+  try{
+    const r=await fetch('/api/preview-style',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({style:SETTINGS.style})});
+    if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.error||'Pratinjau gagal')}
+    const blob=await r.blob(); if(seq!==refreshPreview._n)return; // ada permintaan yang lebih baru
+    if(img._u)URL.revokeObjectURL(img._u); img._u=URL.createObjectURL(blob); img.src=img._u;
+    const p=STATE.projects.find(x=>x.status==='siap'&&x.source);
+    info.textContent=p?`Frame dari "${p.title}"`:'Latar contoh. Tambahkan video untuk melihat dengan video Anda.';
+  }catch(e){info.textContent=e.message}
+  finally{if(seq===refreshPreview._n)img.classList.remove('loading')}
+}
 
 /* ---------------- pengaturan ---------------- */
 async function loadSettings(){
   SETTINGS = await api('/api/settings');
   $('#nclips').value = SETTINGS.n_clips;
-  $('#aimode').innerHTML = SETTINGS.has_key
+  $('#lang').value = SETTINGS.language;
+  const gpu = SETTINGS.gpu||{};
+  $('#aimode').innerHTML = (SETTINGS.has_key
     ? '🤖 Mode AI aktif: momen, judul & caption dipilih oleh Claude.'
-    : '⚡ Mode lokal: momen dipilih otomatis di komputer Anda (gratis). Tambahkan Claude API key di Pengaturan untuk hasil lebih pintar.';
+    : '⚡ Mode lokal: momen dipilih otomatis di komputer Anda (gratis). Tambahkan Claude API key di Pengaturan untuk hasil lebih pintar.')
+    + '<br>' + (gpu.device==='cuda' ? '🚀 Transkrip memakai GPU NVIDIA.'
+    : '🐢 Transkrip memakai CPU' + (gpu.error ? ` (GPU gagal dipakai: ${esc(gpu.error)})` : '') + '.');
   buildStyle();
 }
 function openSettings(){
@@ -273,7 +311,7 @@ function closeModal(id){$('#'+id).classList.remove('on'); if(id==='player'){cons
 /* ---------------- input ---------------- */
 async function submitLinks(){
   const links=$('#links').value.trim(); if(!links){toast('Tempel link video dulu');return}
-  const r=await api('/api/add',{method:'POST',body:{links,n_clips:+$('#nclips').value,auto_render:$('#autorender').checked}});
+  const r=await api('/api/add',{method:'POST',body:{links,n_clips:+$('#nclips').value,auto_render:$('#autorender').checked,language:$('#lang').value}});
   $('#links').value=''; toast(`${r.count} video masuk antrian`); poll();
 }
 const drop=$('#drop'), fileIn=$('#file');
@@ -284,7 +322,7 @@ drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');uploadFiles(e.d
 fileIn.onchange=()=>uploadFiles(fileIn.files);
 async function uploadFiles(files){
   for(const f of files){
-    const fd=new FormData(); fd.append('file',f); fd.append('n_clips',$('#nclips').value); fd.append('auto_render',$('#autorender').checked);
+    const fd=new FormData(); fd.append('file',f); fd.append('n_clips',$('#nclips').value); fd.append('auto_render',$('#autorender').checked); fd.append('language',$('#lang').value);
     drop.textContent=`Mengunggah ${f.name}...`;
     await api('/api/upload',{method:'POST',body:fd});
   }
@@ -292,7 +330,9 @@ async function uploadFiles(files){
 }
 
 /* ---------------- daftar proyek ---------------- */
-function sig(p){return JSON.stringify([p.status,p.error,p.warning,p.source,(p.clips||[]).map(c=>[c.id,c.start,c.end,c.title,c.selected,c.render_status,c.file,c.error])])}
+function sig(p){return JSON.stringify([p.status,p.error,p.warning,p.source,p.source_removed,(p.clips||[]).map(c=>[c.id,c.start,c.end,c.title,c.selected,c.render_status,c.file,c.error])])}
+function sizeText(p){return p.size_mb?(p.size_mb>=1000?(p.size_mb/1000).toFixed(1)+' GB':Math.round(p.size_mb)+' MB'):''}
+const isBusy = p => p.status==='proses'||p.status==='antri'||(p.clips||[]).some(c=>c.render_status==='proses'||c.render_status==='antri');
 function scoreCls(s){return s>=80?'hi':s>=65?'mid':'lo'}
 
 function projectHTML(p){
@@ -306,18 +346,21 @@ function projectHTML(p){
       ${p.error?`<div class="err">⚠ ${esc(p.error)}</div>`:''}
       ${p.warning?`<div class="warn">${esc(p.warning)}</div>`:''}
     </div>
-    <div class="row">${p.status==='gagal'?`<button class="btn sm" onclick="retry('${p.id}')">↻ Ulangi</button>`:''}
+    <div class="row">${p.status==='gagal'&&!p.source_removed?`<button class="btn sm" onclick="retry('${p.id}')">↻ Ulangi</button>`:''}
+      ${p.status==='proses'||p.status==='antri'?`<button class="btn sm" onclick="cancelJob('${p.id}')" title="Hentikan proses">✕ Batal</button>`:''}
       <button class="btn sm ghost danger" onclick="delProject('${p.id}')" title="Hapus">🗑</button></div>
   </div>`;
   if(p.status==='siap'){
-    const sel=(p.clips||[]).filter(c=>c.selected).length;
+    const sel=(p.clips||[]).filter(c=>c.selected).length, has=!!p.source;
     h += `<div class="ptools">
-      <button class="btn sm primary" onclick="renderProject('${p.id}')">▶ Render ${sel} clip terpilih</button>
+      ${has?`<button class="btn sm primary" onclick="renderProject('${p.id}')">▶ Render ${sel} clip terpilih</button>
       <button class="btn sm" onclick="addManual('${p.id}')">＋ Clip manual</button>
       <button class="btn sm" onclick="openTranscript('${p.id}')">📝 Transkrip</button>
-      <button class="btn sm" onclick="reanalyze('${p.id}')">↻ Cari ulang momen</button>
+      <button class="btn sm" onclick="reanalyze('${p.id}')">↻ Cari ulang momen</button>`
+      :`<span class="tag" style="align-self:center">Video sumber sudah dihapus. Hasil render di folder output tetap aman.</span>`}
       <div class="grow"></div>
-      <span class="small muted" style="align-self:center">${p.duration?`Durasi video ${fmt(p.duration)}`:''}</span>
+      <span class="small muted" style="align-self:center">${p.duration?`Durasi ${fmt(p.duration)}`:''}${p.size_mb?` · <span data-size>${sizeText(p)}</span>`:''}</span>
+      ${has&&!isBusy(p)?`<button class="btn sm ghost" onclick="dropSource('${p.id}')" title="Hapus video asli & audio untuk menghemat disk">🧹 Hapus video sumber</button>`:''}
     </div>`;
     if(!(p.clips||[]).length) h+=`<div class="empty">Tidak ada momen ditemukan. Coba "Clip manual" atau "Transkrip".</div>`;
     for(const c of p.clips||[]) h += clipHTML(p,c);
@@ -325,7 +368,7 @@ function projectHTML(p){
   return h;
 }
 function clipHTML(p,c){
-  const dur=(c.end-c.start), rs=c.render_status;
+  const dur=(c.end-c.start), rs=c.render_status, has=!!p.source;
   let status='';
   if(rs==='antri') status=`<span class="tag run">Antri render</span>`;
   else if(rs==='proses') status=`<span class="tag run">Render <span data-cprog="${c.id}">${Math.round((c.render_progress||0)*100)}</span>%</span><div class="bar" style="width:150px;margin:0"><div data-cbar="${c.id}" style="width:${(c.render_progress||0)*100}%"></div></div>`;
@@ -354,15 +397,16 @@ function clipHTML(p,c){
         <span class="small muted">${dur.toFixed(0)} dtk</span>
         <button class="btn sm ghost" onclick="nudge('${p.id}','${c.id}','start',-1)" title="Mulai 1 dtk lebih awal">⇤ -1</button>
         <button class="btn sm ghost" onclick="nudge('${p.id}','${c.id}','end',1)" title="Selesai 1 dtk lebih lama">+1 ⇥</button>
-        <button class="btn sm" onclick="preview('${p.id}','${c.id}')">▷ Pratinjau</button>
+        ${has?`<button class="btn sm" onclick="preview('${p.id}','${c.id}')">▷ Pratinjau</button>`:''}
       </div>
       ${c.reason?`<div class="small" style="margin-bottom:4px"><span class="tag">💡 ${esc(c.reason)}</span></div>`:''}
       <div class="ctext" onclick="this.classList.toggle('open')">${esc(c.text||'')}</div>
     </div>
     <div class="cact">
       ${status}
-      ${result || (rs!=='antri'&&rs!=='proses'?`<button class="btn sm" onclick="renderOne('${p.id}','${c.id}')">▶ Render</button>`:'')}
-      ${rs==='selesai'?`<button class="btn sm ghost" onclick="renderOne('${p.id}','${c.id}')">↻ Render ulang</button>`:''}
+      ${rs==='antri'||rs==='proses'?`<button class="btn sm ghost" onclick="cancelJob('${p.id}','${c.id}')">✕ Batal render</button>`:''}
+      ${result || (has&&rs!=='antri'&&rs!=='proses'?`<button class="btn sm" onclick="renderOne('${p.id}','${c.id}')">▶ Render</button>`:'')}
+      ${has&&rs==='selesai'?`<button class="btn sm ghost" onclick="renderOne('${p.id}','${c.id}')">↻ Render ulang</button>`:''}
       <button class="btn sm ghost danger" onclick="delClip('${p.id}','${c.id}')" title="Hapus clip">✕</button>
     </div>
   </div>`;
@@ -384,6 +428,7 @@ function draw(){
     else{ // update progres saja
       const st=el.querySelector('[data-stage]'); if(st) st.textContent=p.stage||'';
       const pb=el.querySelector('[data-pbar]'); if(pb) pb.style.width=(p.progress||0)*100+'%';
+      const sz=el.querySelector('[data-size]'); if(sz) sz.textContent=sizeText(p);
       for(const c of p.clips||[]){const a=el.querySelector(`[data-cprog="${c.id}"]`);if(a)a.textContent=Math.round((c.render_progress||0)*100);const b=el.querySelector(`[data-cbar="${c.id}"]`);if(b)b.style.width=(c.render_progress||0)*100+'%'}
     }
     if(prev) prev.after(el); else if(box.firstChild!==el) box.prepend(el);
@@ -408,6 +453,10 @@ async function renderOne(pid,cid){await api(`/api/project/${pid}/render`,{method
 async function renderProject(pid){const r=await api(`/api/project/${pid}/render`,{method:'POST',body:{}});toast(`${r.count} clip masuk antrian render`);poll()}
 async function renderAll(){const r=await api('/api/render-all',{method:'POST'});toast(`${r.count} clip masuk antrian render`);poll()}
 async function retry(pid){await api(`/api/project/${pid}/retry`,{method:'POST'});poll()}
+async function cancelJob(pid,cid){const r=await api(`/api/project/${pid}/cancel`,{method:'POST',body:cid?{cid}:{}});toast(r.count?'Dibatalkan':'Tidak ada yang perlu dibatalkan');poll()}
+async function dropSource(pid){
+  if(!confirm('Hapus video sumber proyek ini untuk menghemat disk?\n\nHasil render di folder output tetap aman, tetapi clip proyek ini tidak bisa dirender lagi.'))return;
+  await api(`/api/project/${pid}/drop-source`,{method:'POST'});toast('Video sumber dihapus');poll()}
 async function reanalyze(pid){const n=prompt('Berapa clip yang dicari?', P(pid).n_clips||SETTINGS.n_clips);if(!n)return;
   if(!confirm('Daftar clip sekarang akan diganti. Lanjut?'))return;
   await api(`/api/project/${pid}/reanalyze`,{method:'POST',body:{n_clips:+n}});poll()}

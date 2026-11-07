@@ -1,8 +1,11 @@
-flask>=3.0
-numpy>=1.26
-pillow>=10.1
-opencv-python-headless>=4.8
-faster-whisper>=1.1
+# Versi fleksibel (cadangan). install.bat memakai requirements-lock.txt lebih dulu,
+# yaitu kombinasi versi yang sudah terbukti jalan.
+flask>=3.0,<4
+numpy>=1.26,<3
+pillow>=10.1,<14
+opencv-python-headless>=4.8,<6
+faster-whisper>=1.1,<2
 yt-dlp[default]
-imageio-ffmpeg>=0.5
-requests>=2.31
+imageio-ffmpeg>=0.5,<1
+requests>=2.31,<3
+anthropic>=2.6,<3
