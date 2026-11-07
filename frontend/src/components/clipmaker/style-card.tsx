@@ -1,13 +1,14 @@
 "use client";
 
-import { ChevronRightIcon, EyeIcon, EyeOffIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ChevronRightIcon, EyeIcon, EyeOffIcon, Loader2Icon, UploadIcon, WandSparklesIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { post } from "@/lib/api";
@@ -51,6 +52,13 @@ export function StyleCard() {
         </CardHeader>
         <CollapsibleContent>
           <CardContent className="flex flex-col gap-4 pt-3">
+            <ReferenceStyle
+              current={style}
+              onApplied={(patch) => {
+                setStyleState((s) => (s ? { ...s, ...patch } : s));
+                setPreview(true);
+              }}
+            />
             <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-x-4 gap-y-3.5">
               {STYLE_FIELDS.map((f) => (
                 <StyleControl key={f.key} field={f} style={style} onChange={setStyle} />
@@ -68,6 +76,155 @@ export function StyleCard() {
         </CollapsibleContent>
       </Collapsible>
     </Card>
+  );
+}
+
+interface StyleFromRef {
+  title: string;
+  style: Partial<Style>;
+  notes: string[];
+  seconds: number;
+}
+
+/** Nilai gaya dalam kata-kata, memakai label yang sama dengan kontrol di bawahnya. */
+function describe(key: keyof Style, v: unknown): string {
+  const f = STYLE_FIELDS.find((x) => x.key === key);
+  if (f?.type === "bool") return v ? "ya" : "tidak";
+  if (f?.type === "select") return f.options.find(([o]) => o === v)?.[1] ?? String(v);
+  if (key === "caption_pos") return `${Math.round(Number(v) * 100)}% dari atas`;
+  return String(v);
+}
+
+/** Baca gaya (subtitle, judul, progress bar, tata letak) dari clip contoh, tanpa API key. */
+function ReferenceStyle({ current, onApplied }: { current: Style; onApplied: (patch: Partial<Style>) => void }) {
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [result, setResult] = useState<StyleFromRef | null>(null);
+  const [preview, setPreview] = useState(false);
+  const fileIn = useRef<HTMLInputElement>(null);
+
+  async function analyze(body: { url: string } | FormData, label: string) {
+    setBusy(label);
+    setResult(null);
+    setPreview(false);
+    try {
+      setResult(await post<StyleFromRef & { ok: boolean }>("/api/style-from-reference", body));
+    } catch {
+    } finally {
+      setBusy(null);
+      if (fileIn.current) fileIn.current.value = "";
+    }
+  }
+
+  async function apply() {
+    if (!result) return;
+    try {
+      await post("/api/settings", { style: result.style });
+      onApplied(result.style);
+      setResult(null);
+      setUrl("");
+      toast.success("Gaya dari clip referensi diterapkan");
+    } catch {}
+  }
+
+  // urutan sama dengan kontrol gaya; hanya yang memang terdeteksi
+  const keys = result ? STYLE_FIELDS.map((f) => f.key).filter((k) => k in result.style) : [];
+  return (
+    <div className="flex flex-col gap-2.5 rounded-xl border p-3.5">
+      <div>
+        <p className="flex items-center gap-2 text-sm font-medium">
+          <WandSparklesIcon className="size-4 text-primary" /> Tiru gaya dari clip referensi
+        </p>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          Tempel link TikTok / Reels / Shorts atau pilih file. Dibaca di komputer Anda, tanpa API key.
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && url.trim() && !busy && analyze({ url }, url)}
+          placeholder="https://www.tiktok.com/@akun/video/..."
+          className="min-w-0 flex-1 basis-48"
+          aria-label="Link clip referensi untuk ditiru gayanya"
+        />
+        <Button size="sm" className="h-8" disabled={!url.trim() || busy !== null} onClick={() => analyze({ url }, url)}>
+          Baca gaya
+        </Button>
+        <Button variant="outline" size="sm" className="h-8" disabled={busy !== null} onClick={() => fileIn.current?.click()}>
+          <UploadIcon /> File
+        </Button>
+        <input
+          ref={fileIn}
+          type="file"
+          accept="video/*"
+          hidden
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (!f) return;
+            const fd = new FormData();
+            fd.append("file", f);
+            analyze(fd, f.name);
+          }}
+        />
+      </div>
+      {busy && (
+        <p className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2Icon className="size-3.5 animate-spin" /> Mengunduh & membaca gaya... (biasanya 5–30 detik)
+        </p>
+      )}
+      {result && (
+        <div className="flex flex-col gap-2 rounded-lg bg-muted/60 p-3 text-xs">
+          <p className="font-semibold [overflow-wrap:anywhere]">
+            Terdeteksi dari &ldquo;{result.title}&rdquo; ({result.seconds} detik pertama):
+          </p>
+          {keys.length ? (
+            <ul className="grid gap-x-4 gap-y-1 sm:grid-cols-2">
+              {keys.map((k) => {
+                const label = STYLE_FIELDS.find((f) => f.key === k)?.label ?? k;
+                const changed = current[k] !== result.style[k];
+                return (
+                  <li key={k} className="flex items-center gap-1.5">
+                    {k === "caption_color" && (
+                      <span
+                        className="size-3 flex-none rounded-full border"
+                        style={{ background: CAPTION_COLORS[String(result.style[k])] }}
+                      />
+                    )}
+                    <span className="text-muted-foreground">{label}:</span>
+                    <span className={cn(changed ? "font-semibold text-foreground" : "text-muted-foreground")}>
+                      {describe(k, result.style[k])}
+                    </span>
+                    {!changed && <span className="text-muted-foreground">(sama)</span>}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="text-muted-foreground">Tidak ada gaya yang bisa dibaca dari clip ini.</p>
+          )}
+          {result.notes.map((n) => (
+            <p key={n} className="text-muted-foreground">
+              {n}
+            </p>
+          ))}
+          {keys.length > 0 && (
+            <div className="flex flex-wrap gap-2 pt-1">
+              <Button size="sm" onClick={apply}>
+                Terapkan gaya ini
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setPreview((v) => !v)}>
+                {preview ? <EyeOffIcon /> : <EyeIcon />} {preview ? "Tutup pratinjau" : "Pratinjau dulu"}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setResult(null)}>
+                Buang
+              </Button>
+            </div>
+          )}
+          {preview && <StylePreview style={{ ...current, ...result.style }} />}
+        </div>
+      )}
+    </div>
   );
 }
 

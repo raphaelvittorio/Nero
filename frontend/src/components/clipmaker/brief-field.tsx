@@ -47,7 +47,9 @@ export function BriefField({
         <b className="text-foreground">Titik waktu</b> (<code>45:20</code>) dibuatkan clip di sekitarnya. Sisa{" "}
         <i>Jumlah clip</i> diisi otomatis; isi Jumlah clip sama dengan banyaknya timeline bila hanya ingin clip
         dari riset Anda. Baris lain menjadi <b className="text-foreground">instruksi</b>
-        {hasKey ? " untuk Claude." : " (tanpa API key dipakai sebagai kata kunci topik)."}
+        {hasKey ? " untuk Claude." : " (tanpa API key dipakai sebagai kata kunci topik)."} Link di sini hanya
+        menentukan <i>momen</i> yang dipotong; untuk meniru <i>tampilan editan</i>, pakai{" "}
+        <b className="text-foreground">Tiru gaya dari clip referensi</b> di kartu Gaya video.
       </p>
     </div>
   );

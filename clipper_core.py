@@ -152,15 +152,16 @@ REF_MAX_SECONDS = 900  # clip referensi lebih dari 15 menit hampir pasti salah t
 
 
 def download_reference(url: str, out_dir: str, cookies_browser: str | None = None,
-                       max_seconds: int = REF_MAX_SECONDS) -> dict:
-    """Unduh audio clip referensi saja (cukup untuk transkrip & pencocokan, jauh lebih cepat)."""
+                       max_seconds: int = REF_MAX_SECONDS, video: bool = False) -> dict:
+    """Unduh clip referensi. Default audio saja (cukup untuk transkrip & pencocokan, jauh lebih cepat);
+    video=True mengunduh gambarnya (maks 1280 px, tanpa digabung audio) untuk meniru gaya."""
     import yt_dlp
     from yt_dlp.utils import match_filter_func
 
     os.makedirs(out_dir, exist_ok=True)
     opts = {
         "outtmpl": os.path.join(out_dir, "ref.%(ext)s"),
-        "format": "ba/b",
+        "format": "bv*[height<=1280]/bv*/b" if video else "ba/b",
         "ffmpeg_location": os.path.dirname(ffmpeg_exe()),
         "noplaylist": True,
         "quiet": True,
@@ -1376,3 +1377,293 @@ def write_srt(words, start, end, path, per_line=6):
             chunk = ws[k:k + per_line]
             f.write(f"{k // per_line + 1}\n{ts(chunk[0]['start'] - start)} --> {ts(chunk[-1]['end'] - start)}\n")
             f.write(" ".join(w["word"] for w in chunk) + "\n\n")
+
+
+# --------------------------------------------------------------------------
+# 6. Tiru gaya dari clip referensi (tanpa AI): baca frame-nya, tebak pengaturan gaya
+# --------------------------------------------------------------------------
+_HUE_NAMES = (("merah", 0), ("kuning", 52), ("hijau", 115), ("biru", 195), ("pink", 318), ("merah", 360))
+# dikalibrasi dengan clip hasil ClipMaker sendiri (gaya diketahui)
+_LINE_TO_FONT = 0.78      # tinggi huruf kapital terdeteksi ≈ 0,78 × ukuran font
+_POS_OFFSET = 0.0         # selisih pusat teks terdeteksi terhadap caption_pos (porsi tinggi layar)
+_UPPER_COVER = 0.32       # porsi kolom huruf setinggi kapital: >= ini berarti HURUF BESAR (kapital ~0,44, campuran ~0,2)
+
+
+def _runs(mask, gap=0, min_len=1) -> list[tuple[int, int]]:
+    """Rentang [a, b) yang bernilai True; celah sampai `gap` digabung."""
+    idx = np.flatnonzero(mask)
+    out = []
+    if not len(idx):
+        return out
+    a = prev = int(idx[0])
+    for i in idx[1:]:
+        i = int(i)
+        if i - prev > gap + 1:
+            if prev + 1 - a >= min_len:
+                out.append((a, prev + 1))
+            a = i
+        prev = i
+    if prev + 1 - a >= min_len:
+        out.append((a, prev + 1))
+    return out
+
+
+def _read_frames(path, info: VideoInfo, fps: float, secs: float, width: int) -> np.ndarray:
+    h = int(round(info.height * width / info.width / 2)) * 2
+    r = subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-i", path, "-t", f"{secs:.1f}",
+                        "-vf", f"fps={fps},scale={width}:{h}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **_popen_kwargs())
+    n = width * h * 3
+    return np.frombuffer(r.stdout[: len(r.stdout) // n * n], np.uint8).reshape(-1, h, width, 3)
+
+
+def _text_masks(frames) -> np.ndarray:
+    """Piksel 'teks bergaris tepi': terang (putih / warna mencolok) yang menempel piksel sangat gelap.
+    Cocok untuk subtitle ber-outline hitam dan teks gelap di kotak terang."""
+    import cv2
+    k = np.ones((5, 5), np.uint8)
+    out = np.empty(frames.shape[:3], np.uint8)
+    for i, f in enumerate(frames):
+        hsv = cv2.cvtColor(f, cv2.COLOR_BGR2HSV)
+        s, v = hsv[..., 1], hsv[..., 2]
+        bright = (v >= 185) & ((s <= 70) | (s >= 140))
+        near_dark = cv2.dilate((v <= 60).astype(np.uint8), k) > 0
+        out[i] = bright & near_dark
+    return out
+
+
+def _caption_masks(frames) -> np.ndarray:
+    """Seperti _text_masks, tetapi hanya bidang terang seukuran huruf yang terpisah satu sama lain
+    (isi huruf subtitle dikelilingi outline hitam). Bidang terang besar, mis. kertas bertulisan di video
+    aslinya atau kotak judul putih, tidak ikut."""
+    import cv2
+    H, W = frames.shape[1:3]
+    k = np.ones((5, 5), np.uint8)
+    out = np.empty(frames.shape[:3], np.uint8)
+    for i, f in enumerate(frames):
+        hsv = cv2.cvtColor(f, cv2.COLOR_BGR2HSV)
+        s, v = hsv[..., 1], hsv[..., 2]
+        bright = ((v >= 185) & ((s <= 70) | (s >= 140))).astype(np.uint8)
+        _, lab, st, _ = cv2.connectedComponentsWithStats(bright, connectivity=4)
+        ok = ((st[:, cv2.CC_STAT_HEIGHT] <= 0.1 * H) & (st[:, cv2.CC_STAT_HEIGHT] >= 0.014 * H)
+              & (st[:, cv2.CC_STAT_WIDTH] <= 0.4 * W) & (st[:, cv2.CC_STAT_AREA] >= 0.00012 * H * W))
+        ok[0] = False
+        near_dark = cv2.dilate((v <= 45).astype(np.uint8), k) > 0
+        out[i] = ok[lab] & near_dark
+    return out
+
+
+def _hue_name(deg: float) -> str:
+    return min(_HUE_NAMES, key=lambda x: abs(x[1] - deg))[0]
+
+
+def analyze_reference_style(path: str, fps: float = 3.0, secs: float = 40.0) -> dict:
+    """Tebak gaya video pendek dari clip contoh, tanpa AI.
+    Hasil: {"style": {kunci gaya yang terdeteksi}, "notes": [catatan untuk pengguna], "seconds": durasi dibaca,
+            "debug": angka mentah untuk kalibrasi}. Kunci yang tidak yakin tidak diisi (pengaturan lama dipakai)."""
+    import cv2
+    info = probe(path)
+    if info.width > info.height * 0.9:
+        raise RuntimeError("clip referensi bukan video vertikal (9:16), gayanya tidak bisa ditiru")
+    frames = _read_frames(path, info, fps, secs, 320)
+    if len(frames) < 6:
+        raise RuntimeError("video referensi terlalu pendek atau tidak bisa dibaca")
+    T, H, W = frames.shape[:3]
+    M = _text_masks(frames)
+    ink = M.mean(axis=2)                      # (T, H): porsi piksel teks per baris
+    on = ink > 0.03
+    style, notes, dbg = {}, [], {}
+    excluded = np.zeros(H, bool)              # baris berisi teks, diabaikan saat menilai tata letak
+
+    # ---- judul: teks diam di bagian atas pada detik-detik awal
+    w0 = max(3, int(2.5 * fps))
+    pres0 = on[:w0].mean(axis=0)
+    xor0 = (M[1:w0] ^ M[:w0 - 1]).mean(axis=2).mean(axis=0)
+    rel0 = xor0 / (ink[:w0].mean(axis=0) + 1e-4)
+    still = (pres0 >= 0.8) & (rel0 < 0.25)
+    still[int(H * 0.55):] = False
+    title = max(_runs(still, gap=4, min_len=max(4, H // 90)), key=lambda r: r[1] - r[0], default=None)
+    if title:
+        ta, tb = title
+        excluded[ta:tb] = True
+        shown = on[:, ta:tb].mean(axis=1) > 0.35
+        gone = next((t for t in range(w0, T - 1) if not shown[t] and not shown[t + 1]), None)
+        if gone is None:
+            style["title_secs"] = 0
+        else:
+            secs_shown = gone / fps
+            style["title_secs"] = 3 if secs_shown <= 4.2 else 5 if secs_shown <= 7.5 else 0
+        style["title_on"] = True
+        # warna kotak judul: baris tepat di atas & di bawah tulisan (bagian kotak tanpa huruf)
+        tf = [t for t in range(T) if shown[t]][:12]
+        cols = np.flatnonzero(M[tf, ta:tb].max(axis=(0, 1)))
+        pad = [y for y in list(range(ta - 5, ta - 1)) + list(range(tb + 2, tb + 6)) if 0 <= y < H]
+        if len(cols) and pad:
+            area = frames[tf][:, pad, cols[0]:cols[-1] + 1].reshape(1, -1, 3)
+            hsv = cv2.cvtColor(np.ascontiguousarray(area), cv2.COLOR_BGR2HSV)[0]
+            h, s, v = (float(np.median(hsv[:, i])) for i in range(3))
+            dbg["title_hsv"] = (h, s, v, ta, tb)
+            if v >= 190 and s <= 60:
+                style["title_bg"] = "putih"
+            elif v >= 160 and s >= 110 and 18 <= h <= 35:
+                style["title_bg"] = "kuning"
+            elif v <= 90:
+                style["title_bg"] = "hitam"
+    else:
+        style["title_on"] = False
+
+    # ---- subtitle: pita teks yang isinya sering berganti. Piksel teks yang hampir selalu ada
+    # (judul, tulisan di video aslinya) dibuang dulu supaya tidak ikut terhitung.
+    C = _caption_masks(frames)
+    Dm = C & ~(C.mean(axis=0) >= 0.5)
+    dink = Dm.mean(axis=2)
+    presence = (dink > 0.03).mean(axis=0)
+    rel = (Dm[1:] ^ Dm[:-1]).mean(axis=2).mean(axis=0) / (dink.mean(axis=0) + 1e-4)
+    cand = (presence > 0.2) & ~excluded
+    cand[: int(H * 0.06)] = False
+    cand[int(H * 0.97):] = False
+    bands = []
+    for a, b in _runs(cand, gap=3, min_len=max(4, H // 80)):
+        pr = presence[a:b]
+        if float(np.average(rel[a:b], weights=pr)) >= 0.3:
+            bands.append((float(pr.sum()), a, b))
+    strong = [x for x in bands if x[0] >= 0.5 * max(bands)[0]] if bands else []
+    n_lines = 0.0
+    for _, sa, sb in strong:
+        per = [len(_runs(Dm[t, sa:sb].mean(axis=1) > 0.03, gap=1, min_len=3)) for t in range(T)]
+        per = [n for n in per if n]
+        n_lines += float(np.median(per)) if per else 0.0
+    dbg["bands"] = (len(strong), n_lines)
+    if n_lines >= 3:  # subtitle paling banyak 2 baris; lebih dari itu tulisan di video (paragraf)
+        notes.append("Banyak tulisan bergerak di video ini (bukan subtitle biasa), pengaturan subtitle tidak diubah.")
+        bands = []
+    if bands:
+        _, a, b = max(bands)
+        a, b = max(0, a - 3), min(H, b + 3)
+        excluded[a:b] = True
+        per_frame = []
+        for t in range(T):
+            m = Dm[t, a:b]
+            per_frame.append((t, m, _runs(m.mean(axis=1) > 0.03, gap=1, min_len=3)))
+        all_h = [lb - la for _, _, ls in per_frame for la, lb in ls]
+        med = float(np.median(all_h)) if all_h else 0.0
+        found = []                                # (frame, mask pita, baris [(atas, bawah, garis dasar)])
+        for t, m, lines in per_frame:
+            lines = [(la, lb) for la, lb in lines if lb - la >= 0.6 * med]   # buang garis bising
+            if lines:
+                found.append((t, m, [(la, lb, la + int(np.flatnonzero(
+                    m[la:lb].mean(axis=1) >= 0.35 * m[la:lb].mean(axis=1).max())[-1]))  # garis dasar
+                    for la, lb in lines]))
+        caps = [base + 1 - la for _, _, ls in found for la, _, base in ls]
+        counts, centers, cover = [], [], []
+        cap = float(np.percentile(caps, 75)) if caps else 0.0     # tinggi huruf kapital / huruf tinggi
+        for t, m, ls in found:
+            nw = 0
+            for la, lb, base in ls:
+                segs = [(sa, sb) for sa, sb in _runs(m[la:lb].max(axis=0) > 0, gap=max(1, int(round(0.22 * med))),
+                                                     min_len=2)
+                        if sb - sa >= 0.25 * med and (m[la:lb, sa:sb].max(axis=1) > 0).sum() >= 0.45 * cap]
+                nw += len(segs)
+                if not segs:
+                    continue
+                body = np.zeros(W, bool)
+                for sa, sb in segs:
+                    body[sa:sb] = True
+                # HURUF BESAR: hampir setiap kolom huruf setinggi huruf kapital (diukur dari garis dasar);
+                # huruf kecil: sebagian besar kolom hanya setinggi huruf 'x'
+                sub = m[la:base + 1] > 0
+                body &= sub.any(axis=0)
+                col_h = sub.shape[0] - sub.argmax(axis=0)
+                cover.append(float((col_h[body] >= 0.92 * cap).mean()) if body.any() else 0.0)
+            if nw:
+                counts.append(nw)
+                centers.append(a + (ls[0][0] + ls[-1][1]) / 2)
+        if counts:
+            cov = float(np.median(cover))
+            dbg["sub"] = dict(band=(a, b), med=med, caps=np.percentile(caps, [10, 50, 75, 90]).tolist(),
+                              counts=np.bincount(counts).tolist(), cover=np.percentile(cover, [25, 50, 75]).round(2).tolist())
+            style["captions"] = True
+            style["caption_size"] = int(np.clip(round(cap * 1920 / H / _LINE_TO_FONT / 2) * 2, 60, 120))
+            style["caption_pos"] = round(float(np.clip(np.median(centers) / H + _POS_OFFSET, 0.5, 0.82)), 2)
+            hist = np.bincount(np.clip(counts, 0, 4), minlength=5)
+            hist[0] = 0
+            style["caption_words"] = int(4 - np.argmax(hist[::-1][:4]))  # yang paling sering; seri -> lebih banyak
+            style["caption_upper"] = bool(cov >= _UPPER_COVER)
+            # warna sorotan: warna mencolok yang paling sering di antara piksel teks
+            px = np.concatenate([cv2.cvtColor(frames[t, a:b], cv2.COLOR_BGR2HSV)[Dm[t, a:b] > 0]
+                                 for t in range(0, T, 2)] or [np.zeros((0, 3), np.uint8)])
+            vivid = px[(px[:, 1] >= 140) & (px[:, 2] >= 150)]
+            if len(px) and len(vivid) >= 0.06 * len(px):
+                hist = np.bincount((vivid[:, 0].astype(int) * 2) // 10, minlength=36)
+                style["caption_color"] = _hue_name(float(np.argmax(hist) * 10 + 5))
+            else:
+                style["caption_color"] = "putih"
+            if presence[a:b].max() < 0.35:
+                notes.append("Subtitle hanya sesekali terlihat, hasil subtitle mungkin kurang tepat.")
+    else:
+        notes.append("Subtitle bergaris tepi tidak terdeteksi, pengaturan subtitle tidak diubah.")
+
+    # ---- progress bar: garis di tepi bawah/atas yang memanjang seiring waktu
+    def growing(row):
+        pix = frames[:, row].astype(int)
+        c0 = pix[-1, 2]
+        same = np.abs(pix - c0).sum(axis=2) < 70
+        lens = np.where(same.all(axis=1), W, np.argmin(same, axis=1))
+        if lens[-1] < 0.12 * W or lens[-1] - lens[0] < 0.1 * W or np.ptp(lens) == 0:
+            return False
+        return float(np.corrcoef(np.arange(T), lens)[0, 1]) > 0.9
+    style["progress_bar"] = bool(growing(H - 2) or growing(1))
+
+    # ---- tata letak
+    gray = frames.mean(axis=3, dtype=np.float32)
+    mid = gray[:, H // 2 - 3: H // 2 + 3]
+    divider = float(((mid.mean(axis=2) < 45) & (mid.std(axis=2) < 20)).any(axis=1).mean())
+    both, single = 0, 0
+    samples = np.linspace(0, T - 1, min(10, T)).astype(int)
+    try:
+        yn = cv2.FaceDetectorYN.create(os.path.join(APP_DIR, "models", "face_yunet.onnx"), "", (W, H), 0.6, 0.3, 20)
+        for t in samples:
+            _, faces = yn.detect(np.ascontiguousarray(frames[t]))
+            faces = [] if faces is None else [f for f in faces if f[2] >= 0.08 * W]
+            cys = [(f[1] + f[3] / 2) / H for f in faces]
+            if any(c < 0.45 for c in cys) and any(c > 0.55 for c in cys):
+                both += 1
+            if any(f[2] >= 0.15 * W for f in faces):
+                single += 1
+    except Exception:
+        pass
+    # video utuh + latar blur / bar hitam: garis tepi lurus selebar layar di atas & bawah video,
+    # di atasnya latar lebih gelap/buram (selisih ke bawah positif), di bawahnya kebalikannya
+    d = np.diff(gray[samples], axis=1)                                 # (n, H-1, W)
+    up = (d > 4).mean(axis=(0, 2))
+    down = (d < -4).mean(axis=(0, 2))
+    lap = np.array([np.abs(cv2.Laplacian(g, cv2.CV_32F)).mean(axis=1) for g in gray[samples]]).mean(axis=0)
+    keep = ~excluded
+    tops = [y for y in range(int(H * 0.12), int(H * 0.45)) if keep[y] and up[y] >= 0.6]
+    blur = None
+    for y1 in tops:
+        # tepi bawah = cerminan tepi atas (video diletakkan di tengah); boleh tertutup subtitle
+        win = range(max(0, H - 8 - y1), min(H - 1, H + 5 - y1))
+        if not any(down[y] >= 0.3 or not keep[y] for y in win):
+            continue
+        y2 = max(win, key=lambda y: down[y])
+        if 0.2 * H <= y2 - y1 <= 0.65 * H:
+            inside = lap[y1 + 3: y2 - 2][keep[y1 + 3: y2 - 2]].mean()
+            outside = np.concatenate([lap[: y1 - 2][keep[: y1 - 2]], lap[y2 + 3:][keep[y2 + 3:]]]).mean()
+            if outside < 0.5 * inside:
+                blur = (y1, y2)
+                break
+    dbg["layout"] = dict(tops=tops, maxup=round(float(up[int(H * .12):int(H * .45)].max()), 2),
+                         maxdown=round(float(down[int(H * .55):int(H * .88)].max()), 2),
+                         divider=divider, both=both, single=single, blur=blur)
+    if divider >= 0.6 or both >= max(2, 0.5 * len(samples)):
+        style["layout"] = "split"
+    elif blur:
+        style["layout"] = "blur"
+    elif single >= 0.4 * len(samples):
+        style["layout"] = "face"
+    else:
+        style["layout"] = "center"
+
+    notes.append("Yang tidak bisa ditiru: jenis font, animasi teks, zoom, musik, b-roll, dan watermark.")
+    return {"style": style, "notes": notes, "seconds": round(T / fps, 1), "debug": dbg}

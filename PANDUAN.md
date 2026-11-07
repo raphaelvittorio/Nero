@@ -49,7 +49,22 @@ Fokus pada momen tentang "investasi". Judul berupa pertanyaan. Jangan ambil bagi
 | Link YouTube video ini dengan `?t=` | Dianggap titik waktu. |
 | Teks lain | **Instruksi/prompt**. Dengan Claude API key, instruksi dibaca AI apa adanya (topik, gaya judul, bahasa caption, dll). Tanpa API key, kata-katanya dipakai sebagai kata kunci topik: `"frasa dalam kutip"` dicocokkan utuh, dan kata setelah *jangan/hindari/tanpa* diberi skor minus. |
 
+Link di kolom ini hanya menentukan **momen** yang dipotong, bukan tampilan editannya. Untuk meniru tampilan, lihat bagian berikut.
+
 Di bawah kolom muncul daftar **Dikenali** supaya Anda bisa memastikan setiap baris terbaca dengan benar. **Jumlah clip** adalah total: timeline dan titik Anda selalu masuk, sisanya diisi momen pilihan otomatis. Bila hanya ingin clip dari riset Anda, isi Jumlah clip sama dengan banyaknya timeline. Clip dari referensi diberi tanda **Timeline Anda**, **Titik riset Anda**, atau **Sama dengan clip referensi**.
+
+### Tiru gaya dari clip referensi (tanpa API key)
+
+Di kartu **2. Gaya video**, tempel link clip yang gaya editannya ingin ditiru (TikTok/Reels/Shorts) lalu tekan **Baca gaya**, atau pilih file video dengan tombol **File**. Aplikasi membaca 40 detik pertama clip itu di komputer Anda dan menebak:
+
+- **Subtitle**: posisi, ukuran, jumlah kata per tampilan, HURUF BESAR atau tidak, warna sorotan kata
+- **Judul/hook**: ada atau tidak, warna kotaknya (putih/kuning/hitam), tampil sepanjang video atau hanya 3/5 detik pertama
+- **Progress bar** di bawah
+- **Tata letak**: ikuti wajah, dua orang (atas/bawah), video utuh + latar blur, atau potong tengah
+
+Hasilnya ditampilkan dulu: nilai yang berbeda dari pengaturan sekarang dicetak tebal. Tekan **Pratinjau dulu** untuk melihat satu frame, lalu **Terapkan gaya ini** bila cocok. Bagian yang tidak terbaca dengan yakin tidak diubah.
+
+Batasannya: hanya untuk video vertikal 9:16, dan paling akurat untuk subtitle ber-outline hitam (gaya TikTok umumnya). Jenis font, animasi teks, zoom, musik, b-roll, dan watermark tidak bisa ditiru. Bila video aslinya sendiri banyak tulisan (slide, berita), hasil subtitle/judul bisa keliru, jadi periksa pratinjaunya sebelum menerapkan.
 
 Setelah semua clip selesai, tekan **🧹 Hapus video sumber** untuk menghemat disk (video asli bisa ratusan MB). Hasil render tetap aman, tetapi clip proyek itu tidak bisa dirender ulang.
 

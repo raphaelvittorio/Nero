@@ -860,6 +860,37 @@ def preview_style():
     return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
+@app.post("/api/style-from-reference")
+def style_from_reference():
+    """Tiru gaya dari clip referensi (link atau file), tanpa AI. Hanya mengembalikan gaya yang terdeteksi;
+    pengaturan baru disimpan setelah pengguna menekan Terapkan."""
+    s = load_settings()
+    tmp = os.path.join(DATA, "style_ref", uuid.uuid4().hex[:8])
+    try:
+        f = request.files.get("file")
+        if f:
+            os.makedirs(tmp, exist_ok=True)
+            path = os.path.join(tmp, "ref" + (os.path.splitext(f.filename or "")[1].lower() or ".mp4"))
+            f.save(path)
+            title = f.filename or "file"
+        else:
+            url = str((request.get_json(silent=True) or {}).get("url") or "").strip()
+            if not url.startswith("http"):
+                return jsonify(error="Tempel link clip referensi atau pilih file video."), 400
+            info = core.download_reference(url, tmp, s.get("cookies_browser") or None, video=True)
+            path, title = info["path"], info["title"]
+        res = core.analyze_reference_style(path)
+        return jsonify(ok=True, title=title, style=res["style"], notes=res["notes"], seconds=res["seconds"])
+    except Exception as e:
+        traceback.print_exc()
+        msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e)).replace("ERROR: ", "")
+        return jsonify(error=f"Gagal membaca clip referensi: {msg}"[:400]), 400
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        if os.path.exists(tmp):
+            remove_later([tmp])
+
+
 @app.get("/media/<pid>/<path:name>")
 def media(pid, name):
     if pid not in projects:  # cegah pid seperti ".." membuka folder data/
