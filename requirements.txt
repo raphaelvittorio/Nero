@@ -1,0 +1,8 @@
+flask>=3.0
+numpy>=1.26
+pillow>=10.1
+opencv-python-headless>=4.8
+faster-whisper>=1.1
+yt-dlp[default]
+imageio-ffmpeg>=0.5
+requests>=2.31

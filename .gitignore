@@ -1,0 +1,11 @@
+# lingkungan Python
+.venv/
+__pycache__/
+*.pyc
+
+# data pribadi & hasil (video, transkrip, pengaturan berisi API key)
+data/
+output/
+
+# dibuat otomatis oleh aplikasi (salinan ffmpeg)
+tools/
