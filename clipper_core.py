@@ -19,11 +19,14 @@ import shutil
 import subprocess
 import sys
 import wave
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
 
 OUT_W, OUT_H, OUT_FPS = 1080, 1920, 30
+RENDER_THREADS = max(1, min(4, (os.cpu_count() or 2) // 2))  # frame yang disusun bersamaan saat render
 
 # --------------------------------------------------------------------------
 # FFmpeg
@@ -865,6 +868,44 @@ def _load_font(size, path=None):
         return ImageFont.load_default()
 
 
+FONTS_DIR = os.path.join(APP_DIR, "fonts")
+# nama -> (berkas di fonts/ atau di folder font Windows, ketebalan untuk font variabel)
+CAPTION_FONTS = {
+    "impact": ("impact.ttf", None),
+    "montserrat": ("Montserrat[wght].ttf", 800),
+    "anton": ("Anton-Regular.ttf", None),
+    "bebas": ("BebasNeue-Regular.ttf", None),
+    "poppins": ("Poppins-ExtraBold.ttf", None),
+    "arial": ("ariblk.ttf", None),  # Arial Black bawaan Windows
+}
+
+
+def _style_font(style: dict, size: int):
+    """Font subtitle/judul sesuai pilihan gaya; bila berkasnya tidak ada, pakai font tebal bawaan."""
+    file, weight = CAPTION_FONTS.get(style.get("caption_font", "impact"), CAPTION_FONTS["impact"])
+    dirs = [FONTS_DIR] + ([os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")] if os.name == "nt" else [])
+    for d in dirs:
+        path = os.path.join(d, file)
+        if os.path.isfile(path):
+            font = _load_font(size, path)
+            if weight:
+                try:
+                    font.set_variation_by_axes([weight])
+                except Exception:
+                    pass
+            return font
+    return _load_font(size)
+
+
+_KEY_WORDS = set(HOOK_WORDS)
+
+
+def _is_key_word(word: str) -> bool:
+    """Kata yang disorot saat 'Sorot kata kunci' aktif: angka, kata pemancing perhatian, seruan."""
+    w = word.lower().strip(".,!?\"'()")
+    return bool(re.search(r"\d", w)) or w in _KEY_WORDS or word.rstrip().endswith("!")
+
+
 def _clean_text(t: str) -> str:
     # buang emoji/karakter yang tidak bisa digambar font biasa
     return "".join(ch for ch in t if ord(ch) < 0x2000 or 0x2010 <= ord(ch) <= 0x206F)
@@ -896,8 +937,11 @@ class CaptionRenderer:
     def __init__(self, words, style):
         self.style = style
         self.font_size = int(style.get("caption_size", 86))
-        self.font = _load_font(self.font_size)
+        self.font = _style_font(style, self.font_size)
+        self.emphasis = bool(style.get("caption_emphasis", False))
+        self.font_big = _style_font(style, int(self.font_size * 1.15)) if self.emphasis else self.font
         self.hl = CAPTION_COLORS.get(style.get("caption_color", "kuning"), (255, 221, 0))
+        self.base = CAPTION_COLORS.get(style.get("caption_base", "putih"), (255, 255, 255))
         self.upper = style.get("caption_upper", True)
         self.y_ratio = float(style.get("caption_pos", 0.68))
         self.max_words = int(style.get("caption_words", 3))
@@ -917,7 +961,7 @@ class CaptionRenderer:
                         or cur[-1]["w"].endswith((".", "!", "?", ","))):
                     groups.append(cur)
                     cur = []
-            cur.append({"s": w["start"], "e": w["end"], "w": txt})
+            cur.append({"s": w["start"], "e": w["end"], "w": txt, "x": self.emphasis and _is_key_word(txt)})
         if cur:
             groups.append(cur)
         for i, g in enumerate(groups):  # tahan teks sampai kelompok berikutnya muncul
@@ -934,11 +978,11 @@ class CaptionRenderer:
             return self.cache[key]
         g = self.groups[gi]
         words = [(w["w"].upper() if self.upper else w["w"]).strip(",") for w in g]
-        font = self.font
+        fonts = [self.font_big if w.get("x") else self.font for w in g]   # kata kunci sedikit lebih besar
         stroke = max(4, self.font_size // 11)
         draw0 = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
-        space = draw0.textlength(" ", font=font)
-        widths = [draw0.textlength(t, font=font) for t in words]
+        space = draw0.textlength(" ", font=self.font)
+        widths = [draw0.textlength(t, font=f) for t, f in zip(words, fonts)]
         # bungkus ke beberapa baris bila terlalu lebar
         max_w = OUT_W - 120
         lines, cur, cw = [], [], 0
@@ -952,19 +996,22 @@ class CaptionRenderer:
             cw += add
         if cur:
             lines.append(cur)
-        lh = int(self.font_size * 1.18)
-        img = Image.new("RGBA", (OUT_W, lh * len(lines) + stroke * 4), (0, 0, 0, 0))
+        line_h = [int(max(fonts[i].size for i in line) * 1.18) for line in lines]
+        img = Image.new("RGBA", (OUT_W, sum(line_h) + stroke * 4), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
         y = stroke * 2
-        for line in lines:
+        for line, lh in zip(lines, line_h):
             lw = sum(widths[i] for i in line) + space * (len(line) - 1)
             x = (OUT_W - lw) / 2
+            top = max(fonts[i].getmetrics()[0] for i in line)
             for i in line:
-                color = self.hl if i == active else (255, 255, 255)
+                f = fonts[i]
+                dy = top - f.getmetrics()[0]  # garis dasar kata besar & kecil disamakan
+                color = self.hl if (i == active or g[i].get("x")) else self.base
                 # bayangan
-                d.text((x + 4, y + 6), words[i], font=font, fill=(0, 0, 0, 140),
+                d.text((x + 4, y + dy + 6), words[i], font=f, fill=(0, 0, 0, 140),
                        stroke_width=stroke, stroke_fill=(0, 0, 0, 140))
-                d.text((x, y), words[i], font=font, fill=color + (255,),
+                d.text((x, y + dy), words[i], font=f, fill=color + (255,),
                        stroke_width=stroke, stroke_fill=(0, 0, 0, 255))
                 x += widths[i] + space
             y += lh
@@ -996,7 +1043,7 @@ def _title_image(title: str, style) -> np.ndarray:
     from PIL import Image, ImageDraw
     title = _clean_text(title).strip()
     size = int(style.get("title_size", 64))
-    font = _load_font(size)
+    font = _style_font(style, size)
     d0 = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
     max_w = OUT_W - 200
     words, lines, cur = title.split(), [], ""
@@ -1236,13 +1283,12 @@ class FrameComposer:
                     part, (OUT_W, self.half), interpolation=cv2.INTER_LINEAR)
             out[self.half - 3:self.half + 3] = 0  # garis pemisah
         else:  # blur: video utuh di tengah, latar belakang buram
+            # digelapkan saat masih kecil (135x240), jauh lebih cepat daripada di ukuran penuh
             small = cv2.resize(f, (OUT_W // 8, OUT_H // 8), interpolation=cv2.INTER_AREA)
-            small = cv2.GaussianBlur(small, (0, 0), 6)
+            small = cv2.convertScaleAbs(cv2.GaussianBlur(small, (0, 0), 6), alpha=0.55)
             out = cv2.resize(small, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
-            out = (out * 0.55).astype(np.uint8)
-            fg = cv2.resize(f, (OUT_W, self.fg_h), interpolation=cv2.INTER_AREA)
             y0 = (OUT_H - self.fg_h) // 2
-            out[y0:y0 + self.fg_h] = fg
+            out[y0:y0 + self.fg_h] = cv2.resize(f, (OUT_W, self.fg_h), interpolation=cv2.INTER_AREA)
 
         if self.title_img is not None and (self.title_secs <= 0 or t < self.title_secs):
             _blend(out, self.title_img, (OUT_W - self.title_img.shape[1]) // 2, int(OUT_H * 0.11))
@@ -1256,57 +1302,179 @@ class FrameComposer:
         return out
 
 
+_ENCODER = None  # "h264_nvenc" bila kartu NVIDIA bisa meng-encode video, selain itu "libx264" (CPU)
+
+
+def video_encoder() -> str:
+    """Encoder video untuk render. NVENC dicoba sekali; bila gagal (tanpa GPU/driver), pakai CPU."""
+    global _ENCODER
+    if _ENCODER is None:
+        _ENCODER = "libx264"
+        if os.environ.get("CLIPMAKER_CPU_ENCODE") != "1":
+            try:
+                r = subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                                    "-i", "color=c=black:s=256x256:d=0.1", "-c:v", "h264_nvenc", "-f", "null", "-"],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, **_popen_kwargs())
+                if r.returncode == 0:
+                    _ENCODER = "h264_nvenc"
+            except Exception:
+                pass
+    return _ENCODER
+
+
+def _video_codec_args(enc: str) -> list[str]:
+    if enc == "h264_nvenc":  # kualitas setara crf ~20, dibatasi supaya file tetap wajar untuk diunggah
+        return ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", "21", "-b:v", "0",
+                "-maxrate", "16M", "-bufsize", "32M"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+
+
+def clip_timeline(words, start: float, end: float, style: dict) -> tuple[list[tuple[int, int]], list[dict]]:
+    """Bagian clip yang dipakai dalam nomor frame relatif terhadap `start` ([(k, m)] = frame k..m-1),
+    dan kata-kata dengan waktu di video hasil (0 = awal). Dengan 'Hapus jeda' (style cut_pauses = detik),
+    diam lebih lama dari batas itu dibuang; batas potongan dibulatkan ke frame supaya audio tetap sinkron."""
+    fps = OUT_FPS
+    n_full = max(1, int(max(0.5, end - start) * fps))
+    ws = sorted((w for w in words if w["end"] > start and w["start"] < end), key=lambda w: w["start"])
+    gap = float(style.get("cut_pauses", 0) or 0)
+    spans = [(0.0, end - start)]
+    if gap > 0 and ws:
+        pad = min(0.12, gap / 2)          # sisa jeda di kiri-kanan potongan supaya tidak terdengar terpotong
+        spans, a, last = [], ws[0]["start"] - start - pad, ws[0]["end"] - start
+        for w in ws[1:]:
+            s0 = w["start"] - start
+            if s0 - last > gap:
+                spans.append((a, last + pad))
+                a = s0 - pad
+            last = max(last, w["end"] - start)
+        spans.append((a, last + 0.25))
+    keep: list[tuple[int, int]] = []
+    for a, b in spans:
+        k, m = max(0, int(round(a * fps))), min(n_full, int(round(b * fps)))
+        if m - k < 2:
+            continue
+        if keep and k <= keep[-1][1]:
+            keep[-1] = (keep[-1][0], max(keep[-1][1], m))
+        else:
+            keep.append((k, m))
+    keep = keep or [(0, n_full)]
+
+    def remap(t):  # detik relatif sumber -> detik video hasil
+        f, acc = t * fps, 0
+        for k, m in keep:
+            if f < k:
+                return acc / fps
+            if f <= m:
+                return (acc + f - k) / fps
+            acc += m - k
+        return acc / fps
+
+    rel = [{"start": round(remap(w["start"] - start), 3), "end": round(remap(w["end"] - start), 3),
+            "word": w["word"]} for w in ws]
+    return keep, rel
+
+
 def render_clip(src: str, start: float, end: float, out_path: str, words: list[dict],
                 style: dict, title: str = "", progress=None) -> str:
+    global _ENCODER
     info = probe(src)
     dur = max(0.5, end - start)
     fps = OUT_FPS
-    n_frames = int(dur * fps)
+    n_full = int(dur * fps)
+    keep, rel = clip_timeline(words, start, end, style)
+    full = keep == [(0, n_full)]
+    n_frames = sum(m - k for k, m in keep)
     sw, sh = _decode_size(info)
-    layout, cam, split = _plan_layout(src, start, dur, info, style, sw, sh, n_frames, fps)
-    comp = FrameComposer(sw, sh, layout, cam, split, style,
-                         [{"start": w["start"] - start, "end": w["end"] - start, "word": w["word"]}
-                          for w in words], title, n_frames)
+    layout, cam, split = _plan_layout(src, start, dur, info, style, sw, sh, n_full, fps)
+    if not full:  # jalur kamera hanya untuk frame yang dipakai
+        idx = np.minimum(np.concatenate([np.arange(k, m) for k, m in keep]), n_full - 1)
+        cam = cam[np.minimum(idx, len(cam) - 1)] if cam is not None else None
+        split = [(xs[np.minimum(idx, len(xs) - 1)], ys[np.minimum(idx, len(ys) - 1)]) for xs, ys in split] \
+            if split else None
+    comp = FrameComposer(sw, sh, layout, cam, split, style, rel, title, n_frames)
+    enc = video_encoder()
+    try:
+        _encode_clip(src, start, dur, keep, full, info, style, sw, sh, comp, n_frames, out_path, enc, progress)
+    except RuntimeError:
+        if enc != "h264_nvenc":
+            raise
+        _ENCODER = "libx264"  # NVENC sempat lolos uji tapi gagal di sini: ulangi dengan CPU
+        _encode_clip(src, start, dur, keep, full, info, style, sw, sh, comp, n_frames, out_path, _ENCODER,
+                     progress)
+    # thumbnail
+    try:
+        run_ffmpeg(["-ss", f"{min(1.0, n_frames / fps / 2):.2f}", "-i", out_path, "-frames:v", "1",
+                    "-vf", "scale=270:-2", out_path.rsplit(".", 1)[0] + ".jpg"])
+    except Exception:
+        pass
+    return out_path
 
+
+def _encode_clip(src, start, dur, keep, full, info, style, sw, sh, comp, n_frames, out_path, enc, progress):
+    fps = OUT_FPS
+    vf = f"fps={fps}"
+    if not full:  # ambil frame k..m-1 dari tiap potongan lalu sambung (batas di tengah antar-frame)
+        cond = "+".join(f"gte(t,{(k - 0.5) / fps:.4f})*lt(t,{(m - 0.5) / fps:.4f})" for k, m in keep)
+        vf += f",select='{cond}',setpts=N/{fps}/TB"
     dec = subprocess.Popen(
-        [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}", "-i", src,
-         "-t", f"{dur:.3f}", "-vf", f"fps={fps},scale={sw}:{sh}", "-f", "rawvideo",
-         "-pix_fmt", "bgr24", "-"],
+        [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
+         "-i", src, "-vf", f"{vf},scale={sw}:{sh}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **_popen_kwargs())
 
     tmp_out = out_path + ".tmp.mp4"
     enc_cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
                "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{OUT_W}x{OUT_H}", "-r", str(fps), "-i", "-"]
     if info.has_audio:
-        enc_cmd += ["-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", src, "-map", "0:v", "-map", "1:a:0",
-                    "-af", "loudnorm=I=-14:TP=-1.5:LRA=11" if style.get("loudnorm", True) else "anull",
-                    "-c:a", "aac", "-b:a", "160k", "-ar", "48000"]
-    enc_cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart", "-shortest", tmp_out]
+        norm = "loudnorm=I=-14:TP=-1.5:LRA=11" if style.get("loudnorm", True) else "anull"
+        enc_cmd += ["-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", src]
+        if full:
+            enc_cmd += ["-map", "0:v", "-map", "1:a:0", "-af", norm]
+        else:  # potongan audio persis sama dengan potongan frame
+            n = len(keep)
+            g = [f"[1:a:0]asplit={n}" + "".join(f"[s{i}]" for i in range(n))] if n > 1 else []
+            g += [(f"[s{i}]" if n > 1 else "[1:a:0]") + f"atrim=start={k / fps:.5f}:end={m / fps:.5f},"
+                  f"asetpts=PTS-STARTPTS[a{i}]" for i, (k, m) in enumerate(keep)]
+            g.append("".join(f"[a{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1,{norm}[aout]")
+            enc_cmd += ["-filter_complex", ";".join(g), "-map", "0:v", "-map", "[aout]"]
+        enc_cmd += ["-c:a", "aac", "-b:a", "160k", "-ar", "48000"]
+    enc_cmd += _video_codec_args(enc) + ["-pix_fmt", "yuv420p", "-movflags", "+faststart", "-shortest", tmp_out]
     err_path = out_path + ".log"
     with open(err_path, "wb") as errf:
-        enc = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE, stderr=errf, **_popen_kwargs())
+        proc = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE, stderr=errf, **_popen_kwargs())
         frame_bytes = sw * sh * 3
-        i = 0
+        i, read, failed = 0, 0, None
+        pending: deque = deque()
+        # beberapa frame disusun bersamaan (OpenCV melepas GIL), urutan tulis tetap sama
+        pool = ThreadPoolExecutor(max_workers=RENDER_THREADS)
         try:
             while i < n_frames:
-                buf = dec.stdout.read(frame_bytes)
-                if len(buf) < frame_bytes:
+                while read < n_frames and len(pending) < RENDER_THREADS * 2:
+                    buf = dec.stdout.read(frame_bytes)
+                    if len(buf) < frame_bytes:
+                        n_frames = read
+                        break
+                    pending.append(pool.submit(comp.frame, np.frombuffer(buf, np.uint8).reshape(sh, sw, 3), read))
+                    read += 1
+                if not pending:
                     break
-                f = np.frombuffer(buf, np.uint8).reshape(sh, sw, 3)
-                enc.stdin.write(comp.frame(f, i).tobytes())
+                proc.stdin.write(np.ascontiguousarray(pending.popleft().result()).data)
                 i += 1
                 if progress and i % 15 == 0:
-                    progress(i / n_frames)
+                    progress(i / max(1, n_frames))
+        except OSError as e:  # mis. encoder berhenti duluan (pipa putus): pesan galatnya ada di log
+            failed = e
         finally:
+            for fut in pending:
+                fut.cancel()
+            pool.shutdown(wait=True)
             try:
-                enc.stdin.close()
+                proc.stdin.close()
             except Exception:
                 pass
             dec.stdout.close()
             dec.wait()
-            enc.wait()
-    if enc.returncode != 0 or not os.path.exists(tmp_out):
+            proc.wait()
+    if failed or proc.returncode != 0 or not os.path.exists(tmp_out):
         with open(err_path, "rb") as f:
             raise RuntimeError("Render gagal: " + f.read().decode("utf-8", "ignore")[-600:])
     os.replace(tmp_out, out_path)
@@ -1314,13 +1482,6 @@ def render_clip(src: str, start: float, end: float, out_path: str, words: list[d
         os.remove(err_path)
     except OSError:
         pass
-    # thumbnail
-    try:
-        run_ffmpeg(["-ss", f"{min(1.0, dur / 2):.2f}", "-i", out_path, "-frames:v", "1",
-                    "-vf", "scale=270:-2", out_path.rsplit(".", 1)[0] + ".jpg"])
-    except Exception:
-        pass
-    return out_path
 
 
 SAMPLE_WORDS = [{"start": 0.0, "end": 0.4, "word": "Contoh"}, {"start": 0.4, "end": 0.8, "word": "subtitle"},
@@ -1362,6 +1523,71 @@ def render_preview(src: str | None, t: float, words: list[dict], style: dict, ti
     return buf.tobytes()
 
 
+def clip_words_text(segments, start: float, end: float) -> str:
+    """Teks subtitle sebuah clip (kata-kata transkrip di rentang itu), untuk diedit pengguna."""
+    return " ".join(w["word"] for s in segments for w in s["words"] if w["end"] > start and w["start"] < end)
+
+
+def edit_words(segments, start: float, end: float, text: str) -> int:
+    """Ganti kata transkrip di rentang clip dengan teks hasil koreksi pengguna (mengubah `segments`).
+    Kata yang sama tetap memakai waktunya; kata yang diganti/ditambah mengisi waktu kata lama di posisi itu,
+    dibagi menurut panjang hurufnya. Hasil: banyaknya kata yang berubah."""
+    import difflib
+    pos = [(si, wi) for si, s in enumerate(segments) for wi, w in enumerate(s["words"])
+           if w["end"] > start and w["start"] < end]
+    new = text.split()
+    if not pos:
+        raise ValueError("Tidak ada kata transkrip di rentang clip ini.")
+    if not new:
+        raise ValueError("Teks subtitle tidak boleh kosong.")
+    old = [segments[si]["words"][wi] for si, wi in pos]
+    placed: list[tuple[int, dict]] = []   # (nomor segmen, kata baru)
+    changed = 0
+
+    def spread(tokens, t0, t1, seg):
+        t1 = max(t1, t0 + 0.05 * len(tokens))
+        total = sum(len(t) for t in tokens) or 1
+        t = t0
+        for tok in tokens:
+            d = (t1 - t0) * len(tok) / total
+            placed.append((seg, {"start": round(t, 2), "end": round(t + d, 2), "word": tok}))
+            t += d
+
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=[w["word"] for w in old], b=new,
+                                                       autojunk=False).get_opcodes():
+        if tag == "equal":
+            placed += [(pos[i][0], dict(old[i])) for i in range(i1, i2)]
+        elif tag == "replace":
+            spread(new[j1:j2], old[i1]["start"], old[i2 - 1]["end"], pos[i1][0])
+            changed += max(i2 - i1, j2 - j1)
+        elif tag == "insert":
+            if placed:  # sisipan memakai separuh akhir waktu kata sebelumnya
+                seg, prev = placed[-1]
+                mid = round((prev["start"] + prev["end"]) / 2, 2)
+                t1, prev["end"] = prev["end"], mid
+                spread(new[j1:j2], mid, t1, seg)
+            else:       # sisipan di paling awal: tepat sebelum kata pertama
+                spread(new[j1:j2], max(0.0, old[0]["start"] - 0.3 * (j2 - j1)), old[0]["start"], pos[0][0])
+            changed += j2 - j1
+        else:  # delete
+            changed += i2 - i1
+
+    gone = set(pos)
+    first = {}
+    for si, wi in pos:
+        first.setdefault(si, wi)
+    by_seg: dict[int, list] = {}
+    for si, w in placed:
+        by_seg.setdefault(si, []).append(w)
+    for si in sorted(first):
+        words = segments[si]["words"]
+        before = [w for wi, w in enumerate(words) if wi < first[si] and (si, wi) not in gone]
+        after = [w for wi, w in enumerate(words) if wi > first[si] and (si, wi) not in gone]
+        segments[si]["words"] = before + by_seg.get(si, []) + after
+        segments[si]["text"] = " ".join(w["word"] for w in segments[si]["words"])
+    return changed
+
+
 def write_srt(words, start, end, path, per_line=6):
     """Simpan juga subtitle .srt (berguna untuk diupload terpisah)."""
     ws = [w for w in words if w["start"] >= start - 0.05 and w["end"] <= end + 0.05]
@@ -1384,9 +1610,12 @@ def write_srt(words, start, end, path, per_line=6):
 # --------------------------------------------------------------------------
 _HUE_NAMES = (("merah", 0), ("kuning", 52), ("hijau", 115), ("biru", 195), ("pink", 318), ("merah", 360))
 # dikalibrasi dengan clip hasil ClipMaker sendiri (gaya diketahui)
-_LINE_TO_FONT = 0.78      # tinggi huruf kapital terdeteksi ≈ 0,78 × ukuran font
+_LINE_TO_FONT = 0.78      # tinggi huruf kapital terdeteksi ≈ 0,78 × ukuran font (untuk Impact; font lain ±15%)
 _POS_OFFSET = 0.0         # selisih pusat teks terdeteksi terhadap caption_pos (porsi tinggi layar)
-_UPPER_COVER = 0.32       # porsi kolom huruf setinggi kapital: >= ini berarti HURUF BESAR (kapital ~0,44, campuran ~0,2)
+ANALYZE_WIDTH = 320       # lebar frame saat membaca gaya (semua ambang dikalibrasi untuk lebar ini)
+# porsi kolom huruf yang hanya setinggi huruf 'x': HURUF BESAR ~0,1-0,3, huruf kecil biasa ~0,6-0,7.
+# Di antaranya tidak pasti (mis. teks kecil, atau Impact huruf kecil yang huruf 'x'-nya hampir setinggi kapital)
+_UPPER_MAX_X, _LOWER_MIN_X = 0.30, 0.50
 
 
 def _runs(mask, gap=0, min_len=1) -> list[tuple[int, int]]:
@@ -1453,6 +1682,26 @@ def _caption_masks(frames) -> np.ndarray:
     return out
 
 
+def _split_gaps(gaps, med: float) -> float:
+    """Batas celah antarkata: dua kelompok celah (antarhuruf kecil, antarkata besar) dipisah dengan cara Otsu.
+    Bila tidak terlihat dua kelompok, pakai perkiraan 0,22 × tinggi baris."""
+    g = np.sort(np.asarray(gaps, float))
+    g = g[g < 0.6 * med]   # celah sangat lebar = jarak ke potongan lain, bukan antarkata
+    if len(g) < 6:
+        return 0.22 * med
+    n, cs = len(g), np.cumsum(g)
+    i = np.arange(1, n)
+    m_lo, m_hi = cs[:-1] / i, (cs[-1] - cs[:-1]) / (n - i)
+    score = i * (n - i) * (m_hi - m_lo) ** 2
+    score[g[1:] == g[:-1]] = -1                 # potong hanya di antara nilai yang berbeda
+    k = int(np.argmax(score))
+    lo, hi = m_lo[k], m_hi[k]
+    if hi < 1.8 * max(lo, 1.0):
+        return 0.22 * med
+    # dibatasi: tanpa celah antarkata (1 kata per tampilan) Otsu bisa memotong di antara huruf
+    return float(np.clip((g[k] + g[k + 1]) / 2, 0.22 * med, 0.38 * med))
+
+
 def _hue_name(deg: float) -> str:
     return min(_HUE_NAMES, key=lambda x: abs(x[1] - deg))[0]
 
@@ -1465,7 +1714,7 @@ def analyze_reference_style(path: str, fps: float = 3.0, secs: float = 40.0) -> 
     info = probe(path)
     if info.width > info.height * 0.9:
         raise RuntimeError("clip referensi bukan video vertikal (9:16), gayanya tidak bisa ditiru")
-    frames = _read_frames(path, info, fps, secs, 320)
+    frames = _read_frames(path, info, fps, secs, ANALYZE_WIDTH)
     if len(frames) < 6:
         raise RuntimeError("video referensi terlalu pendek atau tidak bisa dibaca")
     T, H, W = frames.shape[:3]
@@ -1539,7 +1788,14 @@ def analyze_reference_style(path: str, fps: float = 3.0, secs: float = 40.0) -> 
         bands = []
     if bands:
         _, a, b = max(bands)
-        a, b = max(0, a - 3), min(H, b + 3)
+        # pita diperlebar ~1 baris: kelompok yang terbungkus 2 baris & huruf tinggi yang jarang muncul ikut terbaca
+        ext = max(3, int(0.8 * (b - a)))
+        a0, b0 = a, b
+        a, b = max(0, a - ext), min(H, b + ext)
+        if excluded[a:a0].any():
+            a = a0 - int(np.argmax(excluded[a:a0][::-1]))
+        if excluded[b0:b].any():
+            b = b0 + int(np.argmax(excluded[b0:b]))
         excluded[a:b] = True
         per_frame = []
         for t in range(T):
@@ -1549,55 +1805,89 @@ def analyze_reference_style(path: str, fps: float = 3.0, secs: float = 40.0) -> 
         med = float(np.median(all_h)) if all_h else 0.0
         found = []                                # (frame, mask pita, baris [(atas, bawah, garis dasar)])
         for t, m, lines in per_frame:
-            lines = [(la, lb) for la, lb in lines if lb - la >= 0.6 * med]   # buang garis bising
+            # buang garis bising (terlalu tipis) dan gabungan subtitle + tulisan video (terlalu tinggi)
+            lines = [(la, lb) for la, lb in lines if 0.6 * med <= lb - la <= 1.7 * med]
             if lines:
                 found.append((t, m, [(la, lb, la + int(np.flatnonzero(
                     m[la:lb].mean(axis=1) >= 0.35 * m[la:lb].mean(axis=1).max())[-1]))  # garis dasar
                     for la, lb in lines]))
-        caps = [base + 1 - la for _, _, ls in found for la, _, base in ls]
-        counts, centers, cover = [], [], []
-        cap = float(np.percentile(caps, 75)) if caps else 0.0     # tinggi huruf kapital / huruf tinggi
+        # celah antarhuruf vs antarkata dipisah dari sebaran celah di clip ini sendiri (tiap font berbeda)
+        gaps = []
+        for _, m, ls in found:
+            for la, lb, _ in ls:
+                ink = _runs(m[la:lb].max(axis=0) > 0)
+                gaps += [s2 - e1 for (_, e1), (s2, _) in zip(ink, ink[1:])]
+        word_gap = _split_gaps(gaps, med)
+        lines_h = [base + 1 - la for _, _, ls in found for la, _, base in ls]
+        counts, centers, word_h, col_all = [], [], [], []
         for t, m, ls in found:
-            nw = 0
+            nw, used = 0, []
             for la, lb, base in ls:
-                segs = [(sa, sb) for sa, sb in _runs(m[la:lb].max(axis=0) > 0, gap=max(1, int(round(0.22 * med))),
-                                                     min_len=2)
-                        if sb - sa >= 0.25 * med and (m[la:lb, sa:sb].max(axis=1) > 0).sum() >= 0.45 * cap]
-                nw += len(segs)
-                if not segs:
-                    continue
-                body = np.zeros(W, bool)
-                for sa, sb in segs:
-                    body[sa:sb] = True
-                # HURUF BESAR: hampir setiap kolom huruf setinggi huruf kapital (diukur dari garis dasar);
-                # huruf kecil: sebagian besar kolom hanya setinggi huruf 'x'
                 sub = m[la:base + 1] > 0
-                body &= sub.any(axis=0)
-                col_h = sub.shape[0] - sub.argmax(axis=0)
-                cover.append(float((col_h[body] >= 0.92 * cap).mean()) if body.any() else 0.0)
+                col_h = sub.shape[0] - sub.argmax(axis=0)       # tinggi huruf per kolom dari garis dasar
+                segs = []
+                for sa, sb in _runs(m[la:lb].max(axis=0) > 0, gap=int(word_gap), min_len=2):
+                    hs = col_h[sa:sb][sub[:, sa:sb].any(axis=0)]
+                    if sb - sa >= 0.25 * med and len(hs) and hs.max() >= 0.45 * med:   # bukan bintik kecil
+                        segs.append((sa, sb, hs))
+                # subtitle rata tengah: ambil rangkaian kata di tengah, buang potongan tulisan video di pinggir
+                groups, cur = [], []
+                for sg in segs:
+                    if cur and sg[0] - cur[-1][1] > 3 * word_gap:
+                        groups.append(cur)
+                        cur = []
+                    cur.append(sg)
+                if cur:
+                    groups.append(cur)
+                mid = [g for g in groups if abs((g[0][0] + g[-1][1]) / 2 - W / 2) <= 0.12 * W]
+                if not mid:
+                    continue
+                used.append((la, lb))
+                for sa, sb, hs in min(mid, key=lambda g: abs((g[0][0] + g[-1][1]) / 2 - W / 2)):
+                    nw += 1
+                    word_h.append(float(hs.max()))   # huruf tertinggi kata itu
+                    col_all.append(hs)
             if nw:
                 counts.append(nw)
-                centers.append(a + (ls[0][0] + ls[-1][1]) / 2)
+                centers.append(a + (used[0][0] + used[-1][1]) / 2)
         if counts:
-            cov = float(np.median(cover))
-            dbg["sub"] = dict(band=(a, b), med=med, caps=np.percentile(caps, [10, 50, 75, 90]).tolist(),
-                              counts=np.bincount(counts).tolist(), cover=np.percentile(cover, [25, 50, 75]).round(2).tolist())
+            # tinggi kapital: kata ber-huruf tinggi (bukan kata huruf kecil saja); kata kunci yang dibesarkan sedikit
+            cap = float(np.percentile(word_h, 80))
+            # huruf kecil: kebanyakan kolom huruf hanya setinggi huruf 'x'; HURUF BESAR: setinggi kapital
+            r = np.concatenate(col_all) / cap
+            xzone = float(np.mean((r >= 0.62) & (r <= 0.88)))
+            dbg["sub"] = dict(band=(a, b), med=med, word_gap=round(word_gap, 1), cap=cap, xz=round(xzone, 2),
+                              lines=np.percentile(lines_h, [10, 50, 90]).tolist(), counts=np.bincount(counts).tolist())
             style["captions"] = True
             style["caption_size"] = int(np.clip(round(cap * 1920 / H / _LINE_TO_FONT / 2) * 2, 60, 120))
             style["caption_pos"] = round(float(np.clip(np.median(centers) / H + _POS_OFFSET, 0.5, 0.82)), 2)
-            hist = np.bincount(np.clip(counts, 0, 4), minlength=5)
-            hist[0] = 0
-            style["caption_words"] = int(4 - np.argmax(hist[::-1][:4]))  # yang paling sering; seri -> lebih banyak
-            style["caption_upper"] = bool(cov >= _UPPER_COVER)
+            # pengaturan = jumlah kata MAKSIMUM; tampilan sering lebih sedikit (kata panjang, akhir kalimat),
+            # jadi pakai jumlah terbesar yang cukup sering muncul
+            hist = np.bincount(np.clip(counts, 0, 4), minlength=5)[1:]
+            style["caption_words"] = int(max(k + 1 for k in range(4) if hist[k] >= 0.35 * hist.max()))
+            if xzone <= _UPPER_MAX_X:
+                style["caption_upper"] = True
+            elif xzone >= _LOWER_MIN_X:
+                style["caption_upper"] = False
+            else:
+                notes.append("HURUF BESAR atau huruf kecil tidak bisa dipastikan, pengaturan itu tidak diubah.")
             # warna sorotan: warna mencolok yang paling sering di antara piksel teks
             px = np.concatenate([cv2.cvtColor(frames[t, a:b], cv2.COLOR_BGR2HSV)[Dm[t, a:b] > 0]
                                  for t in range(0, T, 2)] or [np.zeros((0, 3), np.uint8)])
             vivid = px[(px[:, 1] >= 140) & (px[:, 2] >= 150)]
+            style["caption_base"], style["caption_color"] = "putih", "putih"
             if len(px) and len(vivid) >= 0.06 * len(px):
-                hist = np.bincount((vivid[:, 0].astype(int) * 2) // 10, minlength=36)
-                style["caption_color"] = _hue_name(float(np.argmax(hist) * 10 + 5))
-            else:
-                style["caption_color"] = "putih"
+                per_name: dict[str, int] = {}
+                for hb, n in enumerate(np.bincount((vivid[:, 0].astype(int) * 2) // 10, minlength=36)):
+                    name = _hue_name(hb * 10 + 5)
+                    per_name[name] = per_name.get(name, 0) + int(n)
+                ranked = sorted(per_name.items(), key=lambda kv: -kv[1])
+                style["caption_color"] = ranked[0][0]
+                # hampir semua huruf berwarna (dan lebih dari 1 kata per tampilan): warna dasarnya bukan putih
+                if len(vivid) >= 0.7 * len(px) and style["caption_words"] > 1:
+                    style["caption_base"] = ranked[0][0]
+                    if len(ranked) > 1 and ranked[1][1] >= 0.15 * len(vivid):
+                        style["caption_color"] = ranked[1][0]
             if presence[a:b].max() < 0.35:
                 notes.append("Subtitle hanya sesekali terlihat, hasil subtitle mungkin kurang tepat.")
     else:

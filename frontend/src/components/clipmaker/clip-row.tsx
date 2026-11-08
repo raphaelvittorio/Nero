@@ -2,6 +2,7 @@
 
 import {
   ArrowRightIcon,
+  CaptionsIcon,
   ClipboardCopyIcon,
   DownloadIcon,
   FolderOpenIcon,
@@ -13,13 +14,22 @@ import {
   RotateCwIcon,
   XIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
+import { Textarea } from "@/components/ui/textarea";
 import { api, clipBusy, fmt, outUrl, parseT, post } from "@/lib/api";
 import type { Clip, Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -33,6 +43,73 @@ const REF_BADGE = {
   titik: { icon: <MapPinIcon />, label: "Titik riset Anda" },
 } as const;
 
+/** Koreksi kata subtitle (salah dengar nama, istilah, bahasa gaul). Waktu tiap kata dipertahankan. */
+function SubtitleEditor({ p, c, onClose }: { p: Project; c: Clip; onClose: () => void }) {
+  const { refresh } = useStore();
+  const [text, setText] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api<{ text: string }>(`/api/project/${p.id}/clip/${c.id}/subtitle`)
+      .then((r) => alive && setText(r.text))
+      .catch(() => alive && onClose());
+    return () => {
+      alive = false;
+    };
+  }, [p.id, c.id, onClose]);
+
+  async function save() {
+    if (text === null) return;
+    setSaving(true);
+    try {
+      const r = await post<{ ok: boolean; changed: number }>(`/api/project/${p.id}/clip/${c.id}/subtitle`, { text });
+      if (!r.changed) toast("Tidak ada kata yang berubah");
+      else
+        toast.success(
+          `${r.changed} kata dikoreksi` + (c.render_status === "selesai" ? ". Render ulang clip ini untuk menerapkannya." : ""),
+        );
+      onClose();
+      refresh();
+    } catch {
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle className="pr-8">Edit subtitle</DialogTitle>
+        <DialogDescription>
+          Perbaiki kata yang salah dengar (nama orang, istilah, bahasa gaul). Waktu tiap kata tetap dipakai, jadi
+          sebaiknya ganti kata saja, jangan menambah atau menghapus banyak kata. Koreksi ikut tersimpan di transkrip.
+        </DialogDescription>
+      </DialogHeader>
+      {text === null ? (
+        <p className="py-8 text-center text-muted-foreground">Memuat subtitle...</p>
+      ) : (
+        <Textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          className="min-h-48 text-[15px] leading-relaxed"
+          spellCheck={false}
+          autoFocus
+          aria-label="Teks subtitle"
+        />
+      )}
+      <DialogFooter>
+        <Button variant="outline" onClick={onClose}>
+          Batal
+        </Button>
+        <Button onClick={save} disabled={text === null || saving}>
+          Simpan
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
+
 function scoreClass(s: number) {
   return s >= 80 ? "text-ok" : s >= 65 ? "text-primary" : "text-muted-foreground";
 }
@@ -40,6 +117,9 @@ function scoreClass(s: number) {
 export function ClipRow({ p, c }: { p: Project; c: Clip }) {
   const { refresh, confirm, setPlayer } = useStore();
   const [textOpen, setTextOpen] = useState(false);
+  const [subOpen, setSubOpen] = useState(false);
+  // tetap sama antar-render, supaya editor tidak memuat ulang teks saat status diperbarui berkala
+  const closeSub = useCallback(() => setSubOpen(false), []);
   const hasSource = Boolean(p.source);
   const busy = clipBusy(c);
   const rs = c.render_status;
@@ -90,6 +170,11 @@ export function ClipRow({ p, c }: { p: Project; c: Clip }) {
   const file = done ? outUrl(c) : "";
   return (
     <div className="grid grid-cols-[auto_auto_1fr] gap-x-3.5 gap-y-3 px-4 py-3.5 sm:px-5 lg:grid-cols-[auto_auto_1fr_auto]">
+      <Dialog open={subOpen} onOpenChange={setSubOpen}>
+        <DialogContent className="sm:max-w-xl">
+          {subOpen && <SubtitleEditor p={p} c={c} onClose={closeSub} />}
+        </DialogContent>
+      </Dialog>
       <Checkbox
         className="mt-1"
         checked={c.selected}
@@ -136,6 +221,9 @@ export function ClipRow({ p, c }: { p: Project; c: Clip }) {
           </Button>
           <Button variant="ghost" size="xs" onClick={() => nudge("end", 1)} title="Selesai 1 dtk lebih lama">
             +1 ⇥
+          </Button>
+          <Button variant="outline" size="xs" onClick={() => setSubOpen(true)} title="Koreksi kata yang salah dengar">
+            <CaptionsIcon /> Subtitle
           </Button>
           {hasSource && (
             <Button
@@ -190,6 +278,11 @@ export function ClipRow({ p, c }: { p: Project; c: Clip }) {
         {rs === "gagal" && (
           <Badge variant="destructive" title={c.error}>
             Gagal render
+          </Badge>
+        )}
+        {c.subs_changed && rs === "selesai" && (
+          <Badge variant="outline" className="text-warn" title="Subtitle dikoreksi setelah render terakhir">
+            Subtitle diubah, render ulang
           </Badge>
         )}
         {busy && (

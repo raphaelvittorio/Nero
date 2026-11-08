@@ -46,6 +46,7 @@ DEFAULT_SETTINGS = {
         "caption_size": 86, "caption_pos": 0.68, "caption_words": 3,
         "title_on": True, "title_secs": 0, "title_bg": "putih", "title_size": 64,
         "progress_bar": True, "handle": "", "loudnorm": True,
+        "caption_font": "impact", "caption_base": "putih", "caption_emphasis": False, "cut_pauses": 0,
     },
 }
 LANGUAGES = {"id", "en", "auto", "ms", "jv"}
@@ -508,7 +509,9 @@ def do_render(pid, cid, token):
 
         core.render_clip(os.path.join(pdir(pid), p["source"]), c["start"], c["end"], out, words,
                          style, c.get("title", "") if style.get("title_on", True) else "", progress=prog)
-        core.write_srt(words, c["start"], c["end"], out.rsplit(".", 1)[0] + ".srt")
+        # waktu subtitle .srt mengikuti video hasil (bisa lebih pendek bila jeda dibuang)
+        keep, rel = core.clip_timeline(words, c["start"], c["end"], style)
+        core.write_srt(rel, 0, sum(m - k for k, m in keep) / core.OUT_FPS, out.rsplit(".", 1)[0] + ".srt")
         with open(out.rsplit(".", 1)[0] + "_caption.txt", "w", encoding="utf-8") as f:
             f.write((c.get("caption") or c.get("title", "")) + "\n\n" + " ".join(c.get("hashtags", [])))
         rel = os.path.relpath(out, OUTPUT).replace("\\", "/")
@@ -516,6 +519,7 @@ def do_render(pid, cid, token):
         if old and old != rel:  # judul berubah: buang hasil render lama clip ini
             remove_later(remove_files(*output_files(old)))
         c["file"] = rel
+        c.pop("subs_changed", None)
         c["rendered_at"] = int(time.time())  # untuk memuat ulang thumbnail di halaman
         c["render_status"], c["render_progress"] = "selesai", 1
     except Exception as e:
@@ -628,7 +632,7 @@ def get_settings():
     s = load_settings()
     s["has_key"] = bool(s.get("api_key"))
     s["api_key"] = ""  # jangan kirim kunci ke halaman
-    s["gpu"] = {"device": core.transcribe_device(), "error": core.CUDA_ERROR}
+    s["gpu"] = {"device": core.transcribe_device(), "error": core.CUDA_ERROR, "encoder": core.video_encoder()}
     return jsonify(s)
 
 
@@ -797,6 +801,37 @@ def upsert_clip(pid):
         p["clips"].sort(key=lambda x: x["start"])
     save_project(p)
     return jsonify(ok=True, clip=c)
+
+
+@app.get("/api/project/<pid>/clip/<cid>/subtitle")
+def get_subtitle(pid, cid):
+    """Teks subtitle clip (dari transkrip), untuk dikoreksi."""
+    p = projects.get(pid) or abort(404)
+    c = next((x for x in p["clips"] if x["id"] == cid), None) or abort(404)
+    return jsonify(text=core.clip_words_text(segments_of(p), c["start"], c["end"]))
+
+
+@app.post("/api/project/<pid>/clip/<cid>/subtitle")
+def set_subtitle(pid, cid):
+    """Simpan koreksi subtitle ke transkrip proyek (berlaku juga untuk clip lain di bagian yang sama)."""
+    p = projects.get(pid) or abort(404)
+    text = str((request.get_json(silent=True) or {}).get("text") or "")
+    with lock:
+        c = next((x for x in p["clips"] if x["id"] == cid), None) or abort(404)
+        segs = segments_of(p)
+        try:
+            changed = core.edit_words(segs, c["start"], c["end"], text)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if changed:
+            with open(os.path.join(pdir(pid), "transcript.json"), "w", encoding="utf-8") as f:
+                json.dump(segs, f, ensure_ascii=False)
+            for x in p["clips"]:
+                x["text"] = " ".join(s["text"] for s in segs if s["end"] > x["start"] and s["start"] < x["end"])
+                if x.get("render_status") == "selesai" and x["end"] > c["start"] and x["start"] < c["end"]:
+                    x["subs_changed"] = True  # hasil render lama masih memakai teks sebelumnya
+    save_project(p)
+    return jsonify(ok=True, changed=changed)
 
 
 @app.delete("/api/project/<pid>/clip/<cid>")

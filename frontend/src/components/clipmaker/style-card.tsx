@@ -185,7 +185,7 @@ function ReferenceStyle({ current, onApplied }: { current: Style; onApplied: (pa
                 const changed = current[k] !== result.style[k];
                 return (
                   <li key={k} className="flex items-center gap-1.5">
-                    {k === "caption_color" && (
+                    {(k === "caption_color" || k === "caption_base") && (
                       <span
                         className="size-3 flex-none rounded-full border"
                         style={{ background: CAPTION_COLORS[String(result.style[k])] }}

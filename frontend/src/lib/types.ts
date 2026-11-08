@@ -22,6 +22,8 @@ export interface Clip {
   rendered_at?: number;
   /** asal clip dari kolom referensi: timeline riset, link clip referensi, atau titik waktu */
   ref?: "timeline" | "link" | "titik" | null;
+  /** subtitle dikoreksi setelah render terakhir: perlu render ulang */
+  subs_changed?: boolean;
 }
 
 export interface Project {
@@ -74,6 +76,13 @@ export interface Style {
   progress_bar: boolean;
   handle: string;
   loudnorm: boolean;
+  caption_font: "impact" | "montserrat" | "anton" | "bebas" | "poppins" | "arial";
+  /** warna teks subtitle selain kata yang disorot */
+  caption_base: string;
+  /** angka & kata pemancing perhatian selalu disorot dan sedikit lebih besar */
+  caption_emphasis: boolean;
+  /** buang diam lebih lama dari ini (detik); 0 = tidak */
+  cut_pauses: number;
 }
 
 export interface Settings {
@@ -87,7 +96,7 @@ export interface Settings {
   auto_render: boolean;
   cookies_browser: string;
   style: Style;
-  gpu: { device: "cuda" | "cpu"; error: string };
+  gpu: { device: "cuda" | "cpu"; error: string; encoder?: "h264_nvenc" | "libx264" };
 }
 
 export interface TranscriptLine {

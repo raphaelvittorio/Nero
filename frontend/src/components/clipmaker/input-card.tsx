@@ -185,6 +185,7 @@ export function InputCard() {
             {gpu?.device === "cuda"
               ? "🚀 Transkrip memakai GPU NVIDIA."
               : `🐢 Transkrip memakai CPU${gpu?.error ? ` (GPU gagal dipakai: ${gpu.error})` : ""}.`}
+            {gpu?.encoder === "h264_nvenc" ? " Encode video memakai GPU (NVENC)." : " Encode video memakai CPU."}
           </p>
         )}
       </CardContent>
