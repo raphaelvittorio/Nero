@@ -18,7 +18,7 @@ export async function api<T = { ok: boolean; count?: number }>(
   try {
     r = await fetch(url, init);
   } catch {
-    toast.error("Tidak bisa terhubung ke Nero. Pastikan jendela run.bat masih terbuka.");
+    toast.error("Tidak bisa terhubung ke Nero. Buka lagi lewat ikon Nero di Desktop.");
     throw new Error("network");
   }
   const j = await r.json().catch(() => ({}));

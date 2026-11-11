@@ -76,8 +76,12 @@ echo [4/4] Mengunduh model transkrip (sekitar 500 MB, sekali saja)...
 "%VPY%" -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8'); print('Model siap.')"
 "%VPY%" -c "from features.clip import engine as c; print('FFmpeg:', c.ffmpeg_exe()); print('Transkrip memakai:', 'GPU' if c.transcribe_device() == 'cuda' else 'CPU')"
 
+REM ---- Ikon Nero di Desktop & Start Menu: membuka Nero tanpa jendela hitam ----
+"%VPY%" desktop.py
+
 echo.
 echo ============================================================
-echo   Instalasi selesai! Klik dua kali run.bat untuk memulai.
+echo   Instalasi selesai! Klik dua kali ikon Nero di Desktop
+echo   untuk memulai (atau cari "Nero" di Start Menu).
 echo ============================================================
 pause

@@ -1,12 +1,24 @@
 "use client";
 
-import { FolderOpenIcon, HomeIcon, SettingsIcon, type LucideIcon } from "lucide-react";
+import { FolderOpenIcon, HomeIcon, PowerIcon, SettingsIcon, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useState } from "react";
+import { toast } from "sonner";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { FEATURES } from "@/features";
-import { openFolder } from "@/lib/api";
+import { openFolder, post } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 import { Logo } from "./logo";
@@ -36,6 +48,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </div>
       <SettingsDialog />
+      <ShutdownDialog />
     </NeroProvider>
   );
 }
@@ -47,7 +60,7 @@ function useActive() {
 
 function Sidebar() {
   const isActive = useActive();
-  const { setSettingsOpen } = useNero();
+  const { setSettingsOpen, setShutdownOpen, online } = useNero();
   return (
     <aside className="sticky top-0 hidden h-svh w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar lg:flex">
       <div className="flex h-16 items-center px-5">
@@ -69,6 +82,11 @@ function Sidebar() {
         <SideButton icon={SettingsIcon} onClick={() => setSettingsOpen(true)}>
           Pengaturan
         </SideButton>
+        {online && (
+          <SideButton icon={PowerIcon} onClick={() => setShutdownOpen(true)}>
+            Matikan Nero
+          </SideButton>
+        )}
         <Status className="px-2.5 pt-2.5 pb-1" />
       </div>
     </aside>
@@ -124,7 +142,7 @@ function Status({ className }: { className?: string }) {
     <div className={cn("flex flex-col gap-1 text-xs text-muted-foreground", className)}>
       <span className="flex items-center gap-2">
         <span className={cn("size-1.5 rounded-full", online ? "bg-ok" : "bg-destructive")} />
-        {online ? "Terhubung" : "Terputus: buka run.bat"}
+        {online ? "Terhubung" : "Terputus: buka ikon Nero"}
       </span>
       {settings && (
         <button
@@ -140,9 +158,49 @@ function Status({ className }: { className?: string }) {
   );
 }
 
+/** Konfirmasi "Matikan Nero": dibuka lewat ikon, Nero tidak punya jendela untuk ditutup. */
+function ShutdownDialog() {
+  const { shutdownOpen, setShutdownOpen, summaries } = useNero();
+  const [stopping, setStopping] = useState(false);
+  const busy = Object.values(summaries).reduce((n, f) => n + f.busy, 0);
+
+  async function shutdown() {
+    setStopping(true);
+    try {
+      await post("/api/shutdown");
+      setShutdownOpen(false);
+      toast.success("Nero dimatikan. Buka lagi lewat ikon Nero di Desktop.", { duration: Infinity });
+    } catch {
+    } finally {
+      setStopping(false);
+    }
+  }
+
+  return (
+    <AlertDialog open={shutdownOpen} onOpenChange={setShutdownOpen}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Matikan Nero?</AlertDialogTitle>
+          <AlertDialogDescription>
+            {busy > 0
+              ? `Masih ada ${busy} tugas yang berjalan. Tugas itu akan berhenti dan perlu diulang nanti.`
+              : "Nero berhenti berjalan di komputer ini. Buka lagi kapan saja lewat ikon Nero di Desktop."}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Batal</AlertDialogCancel>
+          <AlertDialogAction variant="destructive" onClick={shutdown} disabled={stopping}>
+            <PowerIcon /> Matikan
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 function MobileBar() {
   const isActive = useActive();
-  const { online, setSettingsOpen } = useNero();
+  const { online, setSettingsOpen, setShutdownOpen } = useNero();
   return (
     <header className="border-b lg:hidden">
       <div className="flex items-center gap-2 px-4 pt-3 pb-2">
@@ -155,6 +213,11 @@ function MobileBar() {
         <Button variant="ghost" size="icon" aria-label="Pengaturan" onClick={() => setSettingsOpen(true)}>
           <SettingsIcon />
         </Button>
+        {online && (
+          <Button variant="ghost" size="icon" aria-label="Matikan Nero" onClick={() => setShutdownOpen(true)}>
+            <PowerIcon />
+          </Button>
+        )}
       </div>
       <nav className="flex gap-1 overflow-x-auto px-3 pb-2" aria-label="Menu utama">
         {[HOME, ...FEATURE_ITEMS].map((it) => {

@@ -15,22 +15,26 @@ Fitur lain akan ditambahkan di versi berikutnya dan otomatis muncul di menu.
 1. Ekstrak folder `Nero` ke tempat yang mudah, misalnya `D:\Nero`.
 2. Klik dua kali **install.bat**. Ia akan menginstal Python, FFmpeg, Deno (dibutuhkan untuk unduhan YouTube), paket yang diperlukan, dan model transkrip (sekitar 500 MB). Bila komputer punya kartu grafis NVIDIA, pustaka CUDA (sekitar 1 GB) ikut dipasang supaya transkrip jauh lebih cepat.
    - Jika muncul pesan "Python selesai diinstal", tutup jendelanya lalu jalankan **install.bat** sekali lagi.
-3. Selesai. Butuh koneksi internet dan ruang disk kurang lebih 3 GB.
+3. Selesai. Ikon **Nero** muncul di Desktop dan Start Menu. Butuh koneksi internet dan ruang disk kurang lebih 3 GB.
 
 ## Memakai Nero
 
-1. Klik dua kali **run.bat**. Browser akan terbuka di `http://127.0.0.1:7860`. Biarkan jendela hitam tetap terbuka selama memakai aplikasi.
+1. Klik dua kali ikon **Nero** di Desktop (atau cari "Nero" di Start Menu). Browser akan terbuka di `http://127.0.0.1:7860`. Tidak ada jendela hitam: Nero berjalan diam-diam sampai dimatikan.
+   - Bila Nero sudah berjalan, ikon cukup membuka halamannya lagi (misalnya setelah tab browser tertutup).
+   - Ikon belum ada (mis. pindah dari versi lama)? Jalankan **run.bat** sekali, buka **Pengaturan**, lalu klik **Buat ikon di Desktop**.
+   - **run.bat** tetap bisa dipakai bila ingin melihat pesan Nero di jendela hitam. Saat dibuka lewat ikon, pesan yang sama ditulis ke `data\nero.log`.
 2. Halaman pertama adalah **Beranda**: ringkasan semua fitur (berapa tugas sedang berjalan, berapa hasil yang sudah jadi). Pilih fitur dari kartu di Beranda atau dari menu di kiri (di layar kecil: menu di atas).
 3. Di bawah menu ada:
    - **Folder hasil**: membuka folder `output`. Setiap fitur punya subfoldernya sendiri, mis. `output\clip`.
-   - **Pengaturan**: pengaturan umum yang dipakai semua fitur (Claude API key, model AI, cookies browser).
-   - Tanda **Terhubung** / **Terputus** (bila terputus, jendela run.bat tertutup) dan apakah **AI Claude** aktif.
+   - **Pengaturan**: pengaturan umum yang dipakai semua fitur (Claude API key, model AI, cookies browser), ikon Nero di Desktop, dan **Jalankan otomatis saat Windows menyala** (Nero langsung siap di latar belakang tanpa membuka browser; buka halamannya lewat ikon Nero).
+   - **Matikan Nero**: menghentikan Nero. Menutup tab browser saja tidak mematikan Nero.
+   - Tanda **Terhubung** / **Terputus** (bila terputus, Nero sedang mati: buka lagi lewat ikon Nero) dan apakah **AI Claude** aktif.
 
 ### Pindah dari ClipMaker versi lama
 
-Cukup timpa berkas aplikasinya (folder `data` dan `output` jangan dihapus). Saat pertama dibuka, Nero otomatis memindahkan proyek lama ke `data\clip\projects` dan hasil render lama ke `output\clip`; pengaturan dan API key tetap terbawa. Bila ada berkas yang sedang dibuka program lain, berkas itu dilewati dan dipindah saat Nero dibuka berikutnya (jendela run.bat memberi tahu).
+Cukup timpa berkas aplikasinya (folder `data` dan `output` jangan dihapus). Saat pertama dibuka, Nero otomatis memindahkan proyek lama ke `data\clip\projects` dan hasil render lama ke `output\clip`; pengaturan dan API key tetap terbawa. Bila ada berkas yang sedang dibuka program lain, berkas itu dilewati dan dipindah saat Nero dibuka berikutnya (jendela run.bat atau `data\nero.log` memberi tahu).
 
-Folder aplikasi boleh diganti namanya (mis. `ClipMaker` menjadi `Nero`); tidak perlu instal ulang.
+Folder aplikasi boleh diganti namanya (mis. `ClipMaker` menjadi `Nero`); tidak perlu instal ulang. Setelah folder dipindah atau diganti namanya, jalankan **run.bat** sekali: ikon Nero di Desktop otomatis diarahkan ke lokasi baru.
 
 ## Clip Maker
 
@@ -123,6 +127,7 @@ Tanpa pengaturan apa pun, setiap fitur bekerja dengan algoritma lokal (gratis); 
 |---|---|
 | Unduhan YouTube gagal / "confirm you're not a bot" | Di **Pengaturan** (menu kiri bawah), isi "Ambil cookies dari browser" dengan browser tempat Anda login YouTube (chrome/edge/firefox). Tutup browser itu saat mengunduh. |
 | Unduhan tiba-tiba gagal padahal dulu bisa | Jalankan **update.bat** (situs video sering berubah). |
+| Ikon Nero diklik tetapi halaman tidak terbuka | Jalankan **run.bat** untuk melihat pesannya, atau buka `data\nero.log`. |
 | Transkrip lambat | Lihat baris di bawah tombol Proses: bila tertulis "memakai CPU" padahal ada kartu NVIDIA, jalankan **install.bat** lagi. Atau di **Pengaturan clip** ganti model transkrip ke **base**. Dengan GPU, pakai **large-v3-turbo**: hampir seakurat large-v3 tetapi jauh lebih cepat. |
 | Subtitle kurang tepat / malah diterjemahkan | Pastikan pilihan **Bahasa** saat menambahkan video sesuai bahasa yang diucapkan (atau pilih Deteksi otomatis), dan pakai model **medium**. |
 | Wajah tidak diikuti | Pilih tata letak **Ikuti wajah**, **Dua orang (atas/bawah)** untuk podcast, atau **Video utuh + latar blur** untuk video dengan banyak orang. |
@@ -137,6 +142,7 @@ Nero/
   requirements*.txt daftar paket (lock = versi yang sudah teruji, gpu = pustaka CUDA)
   app.py            server web lokal: keamanan, tampilan, pengaturan umum, memuat semua fitur
   common.py         bagian bersama semua fitur (lokasi folder, pengaturan, hapus berkas)
+  desktop.py        ikon Nero di Desktop & Start Menu, buka otomatis, berjalan tanpa jendela hitam
   features/         satu folder per fitur
     clip/           Clip Maker: api.py (rute & antrian), engine.py (unduh, transkrip, momen, render)
   web/              tampilan aplikasi siap pakai (hasil build frontend/, jangan diubah langsung)
@@ -145,7 +151,7 @@ Nero/
   fonts/            font subtitle gratis (lisensi SIL OFL, berkas OFL-*.txt)
   tests/            tes otomatis
   output/           HASIL ANDA, satu subfolder per fitur (output/clip = video clip)
-  data/             pengaturan (settings.json) dan data setiap fitur (data/clip = proyek & transkrip)
+  data/             pengaturan (settings.json), catatan nero.log, dan data setiap fitur (data/clip = proyek & transkrip)
 ```
 
 ## Mengubah tampilan (khusus pengembang)

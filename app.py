@@ -5,20 +5,38 @@ Satu aplikasi berisi banyak fitur untuk membantu menghasilkan uang dari internet
 di folder features/ (lihat features/__init__.py); berkas ini hanya mengurus hal yang dipakai bersama:
 keamanan, tampilan, pengaturan umum, dan folder hasil.
 
-Buka http://127.0.0.1:7860 setelah menjalankan run.bat
+Buka lewat ikon Nero di Desktop (tanpa jendela hitam, lihat desktop.py) atau run.bat (dengan jendela
+berisi pesan), lalu http://127.0.0.1:7860 terbuka di browser.
 """
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import webbrowser
 from urllib.parse import urlsplit
 
-from flask import Flask, abort, jsonify, request, send_from_directory
-
 import common
+import desktop
 from common import OUTPUT, WEB
-from features import FEATURES
+
+PORT = int(os.environ.get("PORT", 7860))
+URL = f"http://127.0.0.1:{PORT}"
+BACKGROUND = desktop.BACKGROUND_ARG in sys.argv[1:]  # dibuka otomatis saat Windows menyala
+
+if __name__ == "__main__":
+    # Dicek sebelum memuat fitur (lama): bila Nero sudah berjalan, cukup buka halamannya.
+    if desktop.nero_running(URL):
+        print(f"{common.APP_NAME} sudah berjalan di {URL}")
+        if not BACKGROUND:
+            webbrowser.open(URL)
+        sys.exit(0)
+    if desktop.WINDOWLESS:
+        desktop.log_to_file()  # sebelum memuat fitur, supaya galat saat memuat pun tercatat
+
+from flask import Flask, abort, jsonify, request, send_from_directory  # noqa: E402
+
+from features import FEATURES  # noqa: E402
 
 app = Flask(__name__, static_folder=None)
 
@@ -51,7 +69,8 @@ def only_local_requests():
 def get_settings():
     """Pengaturan umum yang dipakai semua fitur. API key tidak pernah dikirim ke halaman."""
     s = common.load_settings()
-    return jsonify(has_key=bool(s["api_key"]), ai_model=s["ai_model"], cookies_browser=s["cookies_browser"])
+    return jsonify(has_key=bool(s["api_key"]), ai_model=s["ai_model"], cookies_browser=s["cookies_browser"],
+                   desktop=desktop.status())
 
 
 @app.post("/api/settings")
@@ -69,6 +88,36 @@ def post_settings():
     if patch.get("ai_model") == "":
         patch.pop("ai_model")
     common.update_settings(patch)
+    if "autostart" in body and desktop.SUPPORTED:
+        try:
+            desktop.set_autostart(bool(body["autostart"]))
+        except Exception as e:
+            return jsonify(error=f"Pengaturan disimpan, tetapi buka otomatis belum bisa diatur: {e}"), 500
+    return jsonify(ok=True)
+
+
+@app.post("/api/shortcut")
+def make_shortcut():
+    """Ikon Nero di Desktop & Start Menu."""
+    if not desktop.SUPPORTED:
+        return jsonify(error="Ikon hanya tersedia di Windows."), 400
+    try:
+        desktop.create_shortcuts()
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+    return jsonify(ok=True)
+
+
+@app.get("/api/ping")
+def ping():
+    """Dipakai ikon Nero untuk mengetahui apakah Nero sudah berjalan."""
+    return jsonify(app=common.APP_NAME)
+
+
+@app.post("/api/shutdown")
+def shutdown():
+    """Tombol "Matikan Nero". Tugas yang sedang berjalan ikut berhenti."""
+    threading.Timer(0.5, lambda: os._exit(0)).start()  # beri waktu jawaban ini sampai ke browser
     return jsonify(ok=True)
 
 
@@ -144,13 +193,13 @@ def not_found(e):
 if __name__ == "__main__":
     for feature in FEATURES:
         feature.start()
-    port = int(os.environ.get("PORT", 7860))
-    url = f"http://127.0.0.1:{port}"
+    desktop.refresh_if_moved_later()
     print("=" * 56)
-    print(f"  {common.APP_NAME} berjalan di", url)
+    print(f"  {common.APP_NAME} berjalan di", URL)
     print("  Fitur:", ", ".join(f.NAME for f in FEATURES))
-    print("  Biarkan jendela ini terbuka selama memakai aplikasi.")
+    if not desktop.WINDOWLESS:
+        print("  Biarkan jendela ini terbuka selama memakai aplikasi.")
     print("=" * 56)
-    if os.environ.get("NO_BROWSER") != "1":
-        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-    app.run(host="127.0.0.1", port=port, threaded=True, debug=False)
+    if os.environ.get("NO_BROWSER") != "1" and not BACKGROUND:
+        threading.Timer(1.5, lambda: webbrowser.open(URL)).start()
+    app.run(host="127.0.0.1", port=PORT, threaded=True, debug=False)

@@ -1,11 +1,12 @@
 "use client";
 
-import { TrashIcon } from "lucide-react";
+import { MonitorIcon, TrashIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
 import { SimpleSelect, type Option } from "@/components/fields";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -47,6 +48,8 @@ function SettingsForm({ settings }: { settings: GlobalSettings }) {
   const [key, setKey] = useState("");
   const [model, setModel] = useState(settings.ai_model);
   const [cookie, setCookie] = useState(settings.cookies_browser || "none");
+  const [autostart, setAutostart] = useState(settings.desktop?.autostart ?? false);
+  const [making, setMaking] = useState(false);
 
   async function save() {
     try {
@@ -54,6 +57,7 @@ function SettingsForm({ settings }: { settings: GlobalSettings }) {
         api_key: key,
         ai_model: model.trim(),
         cookies_browser: cookie === "none" ? "" : cookie,
+        ...(settings.desktop && autostart !== settings.desktop.autostart ? { autostart } : {}),
       });
       setSettingsOpen(false);
       await loadSettings();
@@ -68,6 +72,18 @@ function SettingsForm({ settings }: { settings: GlobalSettings }) {
       await loadSettings();
       toast.success("API key dihapus");
     } catch {}
+  }
+
+  async function makeShortcut() {
+    setMaking(true);
+    try {
+      await post("/api/shortcut");
+      await loadSettings();
+      toast.success("Ikon Nero dibuat di Desktop & Start Menu");
+    } catch {
+    } finally {
+      setMaking(false);
+    }
   }
 
   const field = "flex flex-col gap-1.5";
@@ -104,6 +120,25 @@ function SettingsForm({ settings }: { settings: GlobalSettings }) {
           </Label>
           <SimpleSelect value={cookie} onChange={setCookie} options={COOKIE_BROWSERS} aria-label="Cookies browser" />
         </div>
+        {settings.desktop && (
+          <div className={cn(field, "gap-3 border-t pt-4")}>
+            <Label>Membuka Nero tanpa terminal</Label>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+              <Button variant="outline" size="sm" onClick={makeShortcut} disabled={making}>
+                <MonitorIcon /> {settings.desktop.shortcut ? "Buat ulang ikon" : "Buat ikon di Desktop"}
+              </Button>
+              <span className={cn("text-xs", settings.desktop.shortcut ? "text-ok" : "text-muted-foreground")}>
+                {settings.desktop.shortcut
+                  ? "✓ Ikon Nero ada di Desktop & Start Menu."
+                  : "Klik dua kali ikonnya untuk membuka Nero."}
+              </span>
+            </div>
+            <Label className="cursor-pointer font-normal">
+              <Checkbox checked={autostart} onCheckedChange={(v) => setAutostart(v === true)} />
+              Jalankan otomatis saat Windows menyala (di latar belakang, browser tidak dibuka)
+            </Label>
+          </div>
+        )}
       </div>
       <DialogFooter className="sm:justify-between">
         <Button variant="destructive" size="sm" onClick={clearKey} disabled={!settings.has_key}>

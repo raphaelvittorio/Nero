@@ -179,6 +179,20 @@ class Rute(unittest.TestCase):
                         headers={"Origin": "http://evil.example"})
         self.assertEqual(r.status_code, 403)
 
+    def test_ping_dan_pengaturan_desktop(self):
+        local = "http://127.0.0.1:7860"
+        self.assertEqual(self.c.get("/api/ping", base_url=local).get_json(), {"app": common.APP_NAME})
+        self.assertIn("desktop", self.c.get("/api/settings", base_url=local).get_json())
+
+    def test_matikan(self):
+        local = "http://127.0.0.1:7860"
+        with mock.patch.object(self.app.threading, "Timer") as timer:  # jangan benar-benar keluar
+            r = self.c.post("/api/shutdown", base_url=local, headers={"Origin": "http://evil.example"})
+            self.assertEqual(r.status_code, 403)
+            timer.assert_not_called()
+            self.assertEqual(self.c.post("/api/shutdown", base_url=local).status_code, 200)
+            timer.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

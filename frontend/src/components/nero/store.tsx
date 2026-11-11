@@ -9,6 +9,8 @@ export interface GlobalSettings {
   has_key: boolean;
   ai_model: string;
   cookies_browser: string;
+  /** Ikon Nero di Desktop & buka otomatis saat Windows menyala (null bila bukan Windows). */
+  desktop: { shortcut: boolean; autostart: boolean } | null;
 }
 
 /** Ringkasan satu fitur dari /api/overview, untuk menu & Beranda. */
@@ -25,6 +27,8 @@ interface NeroStore {
   online: boolean;
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
+  shutdownOpen: boolean;
+  setShutdownOpen: (open: boolean) => void;
 }
 
 const Ctx = createContext<NeroStore | null>(null);
@@ -40,6 +44,7 @@ export function NeroProvider({ children }: { children: React.ReactNode }) {
   const [summaries, setSummaries] = useState<Record<string, FeatureSummary>>({});
   const [online, setOnline] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [shutdownOpen, setShutdownOpen] = useState(false);
 
   const loadSettings = useCallback(() => api<GlobalSettings>("/api/settings").then(setSettings), []);
 
@@ -77,7 +82,9 @@ export function NeroProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <Ctx.Provider value={{ settings, loadSettings, summaries, online, settingsOpen, setSettingsOpen }}>
+    <Ctx.Provider
+      value={{ settings, loadSettings, summaries, online, settingsOpen, setSettingsOpen, shutdownOpen, setShutdownOpen }}
+    >
       {children}
     </Ctx.Provider>
   );
