@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 import common
 import desktop
+import gemini_ai
 import local_ai
 from common import OUTPUT, WEB
 
@@ -73,27 +74,38 @@ def get_settings():
     s = common.load_settings()
     return jsonify(has_key=bool(s["api_key"]), ai_model=s["ai_model"], cookies_browser=s["cookies_browser"],
                    local_ai_url=s["local_ai_url"], local_ai_model=s["local_ai_model"],
-                   local_ai_on=bool(s["local_ai_on"]), desktop=desktop.status())
+                   local_ai_on=bool(s["local_ai_on"]), has_local_ai_key=bool(s["local_ai_key"]),
+                   ai_provider=s["ai_provider"], has_gemini_key=bool(s["gemini_key"]),
+                   gemini_model=s["gemini_model"], desktop=desktop.status())
 
 
 @app.post("/api/settings")
 def post_settings():
     body = request.get_json(force=True) or {}
     patch = {}
-    key = body.get("api_key")
-    if isinstance(key, str) and key.strip():  # kosong = tetap memakai kunci lama
-        patch["api_key"] = key.strip()
-    if body.get("clear_key"):
-        patch["api_key"] = ""
-    for k in ("ai_model", "cookies_browser", "local_ai_model"):
+    # kunci rahasia: kosong = tetap memakai kunci lama, clear_<nama> = hapus
+    for k, clear in (("api_key", "clear_key"), ("gemini_key", "clear_gemini_key"),
+                     ("local_ai_key", "clear_local_ai_key")):
+        v = body.get(k)
+        if isinstance(v, str) and v.strip():
+            patch[k] = v.strip()
+        if body.get(clear):
+            patch[k] = ""
+    for k in ("ai_model", "cookies_browser", "local_ai_model", "gemini_model"):
         if k in body:
             patch[k] = str(body[k] or "").strip()
     if "local_ai_url" in body:
         patch["local_ai_url"] = local_ai.clean_url(str(body["local_ai_url"] or ""))
     if "local_ai_on" in body:
         patch["local_ai_on"] = bool(body["local_ai_on"])
-    if patch.get("ai_model") == "":
-        patch.pop("ai_model")
+    if body.get("ai_provider") in ("lokal", "gemini"):
+        patch["ai_provider"] = body["ai_provider"]
+    for k, default in (("ai_model", None), ("gemini_model", gemini_ai.DEFAULT_MODEL)):
+        if patch.get(k) == "":
+            if default:
+                patch[k] = default
+            else:
+                patch.pop(k)
     common.update_settings(patch)
     if "autostart" in body and desktop.SUPPORTED:
         try:
@@ -110,11 +122,23 @@ _pull: dict[str, local_ai.PullJob] = {}   # unduhan model AI lokal yang sedang/t
 def local_ai_info():
     """Status AI lokal gratis (Ollama / LM Studio): berjalan atau tidak, model yang ada, unduhan model."""
     s = common.load_settings()
-    st = local_ai.status(s["local_ai_url"])
+    st = local_ai.status(s["local_ai_url"], s["local_ai_key"])
     job = _pull.get("job")
     return jsonify(url=st["url"], on=bool(s["local_ai_on"]), model=s["local_ai_model"], status=st,
                    chosen=local_ai.pick_model(st, s["local_ai_model"]) if st["ok"] else None,
-                   recommended=local_ai.RECOMMENDED, pull=job.as_dict() if job else None)
+                   recommended=local_ai.RECOMMENDED, pull=job.as_dict() if job else None,
+                   provider=s["ai_provider"], gemini={"has_key": bool(s["gemini_key"]), "model": s["gemini_model"],
+                                                      "key_page": gemini_ai.KEY_PAGE})
+
+
+@app.post("/api/gemini/check")
+def gemini_check():
+    """Uji API key Gemini yang tersimpan (atau yang baru diketik, tanpa menyimpannya)."""
+    body = request.get_json(silent=True) or {}
+    s = common.load_settings()
+    key = str(body.get("key") or "").strip() or s["gemini_key"]
+    model = str(body.get("model") or "").strip() or s["gemini_model"]
+    return jsonify(gemini_ai.check(key, model))
 
 
 @app.post("/api/local-ai/pull")

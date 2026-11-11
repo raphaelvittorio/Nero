@@ -16,7 +16,7 @@ import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { CommitInput } from "@/components/fields";
-import { localAIReady, useNero } from "@/components/nero/store";
+import { styleAI, useNero } from "@/components/nero/store";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -145,8 +145,8 @@ function ReferenceBody() {
           <WandSparklesIcon className="size-4" /> Tiru gaya dari clip
         </DialogTitle>
         <DialogDescription>
-          Nero mengukur subtitle, judul, tata letak & zoom dari piksel video, lalu AI lokal gratis melihat font, cara
-          menyorot kata, dan nuansa warnanya. Hasilnya otomatis tersimpan di Gaya saya.
+          Nero mengukur subtitle, judul, tata letak & zoom dari piksel video, lalu AI gratis (Gemini atau AI lokal)
+          menilai font, cara menyorot kata, animasi, dan nuansa warnanya. Hasilnya otomatis tersimpan di Gaya saya.
         </DialogDescription>
       </DialogHeader>
       {!job || job.status === "batal" ? (
@@ -175,7 +175,9 @@ function ReferenceForm() {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const fileIn = useRef<HTMLInputElement>(null);
-  const ready = localAIReady(localAI);
+  const ai = styleAI(localAI);
+  const ready = ai.ready;
+  const wantsGemini = localAI?.provider === "gemini";
 
   async function go(body: { url: string } | FormData) {
     setBusy(true);
@@ -229,33 +231,43 @@ function ReferenceForm() {
       >
         <span className={cn("mt-1 size-2 flex-none rounded-full", ready ? "bg-ok" : "bg-warn")} />
         <div className="min-w-0 flex-1">
-          {ready ? (
+          {ai.kind === "gemini" ? (
             <p>
-              <b>AI lokal siap</b> ({localAI?.chosen}). Pertama kali membaca bisa 1–3 menit selagi model dimuat,
-              berikutnya lebih cepat.
+              <b>Gemini siap</b> ({localAI?.gemini.model}). Gemini menonton 20 detik pertama clip, biasanya selesai
+              dalam 20–40 detik. Clip dikirim ke Google; bila kuota gratis habis, Nero memakai AI lokal.
+            </p>
+          ) : ai.kind === "lokal" ? (
+            <p>
+              <b>AI lokal siap</b> ({localAI?.chosen}).{" "}
+              {wantsGemini ? "Gemini dipilih tetapi API key-nya belum diisi. " : ""}
+              Pertama kali membaca bisa 1–3 menit selagi model dimuat, berikutnya lebih cepat.
             </p>
           ) : localAI && !localAI.on ? (
             <p>
-              <b>AI lokal dimatikan.</b> Gaya tetap dibaca dari piksel (ukuran, posisi, warna, judul, zoom), tetapi
-              font & cara menyorot kata tidak ditiru.
+              <b>AI dimatikan.</b> Gaya tetap dibaca dari piksel (ukuran, posisi, warna, judul, zoom), tetapi font &
+              cara menyorot kata tidak ditiru.
             </p>
           ) : (
             <p>
-              <b>AI lokal belum siap</b>
-              {localAI?.status.ok ? ": belum ada model yang bisa melihat gambar." : ": Ollama belum berjalan."} Gaya
-              tetap dibaca dari piksel, tetapi font & cara menyorot kata tidak ditiru. Siapkan sekali saja, gratis.
+              <b>AI belum siap</b>
+              {wantsGemini ? ": API key Gemini belum diisi." : localAI?.status.ok ? ": belum ada model yang bisa melihat gambar." : ": Ollama belum berjalan."}{" "}
+              Gaya tetap dibaca dari piksel, tetapi font & cara menyorot kata tidak ditiru. Siapkan sekali saja, gratis.
             </p>
           )}
         </div>
-        {!ready && (
+        {(!ready || (wantsGemini && ai.kind !== "gemini")) && (
           <Button size="xs" variant="outline" onClick={() => setSettingsOpen(true)}>
-            Siapkan AI lokal
+            Siapkan AI
           </Button>
         )}
       </div>
       <ul className="grid gap-1.5 text-xs text-muted-foreground sm:grid-cols-2">
         <li>✓ Pakai clip pendek vertikal (TikTok / Reels / Shorts) yang bersubtitle.</li>
-        <li>✓ Dibaca di komputer Anda; video tidak dikirim ke layanan AI mana pun.</li>
+        <li>
+          {ai.kind === "gemini"
+            ? "✓ Hanya potongan kecil clip (20 detik, tanpa suara) yang dikirim ke Gemini."
+            : "✓ Dibaca di komputer Anda; video tidak dikirim ke layanan AI mana pun."}
+        </li>
         <li>✓ Semua hasil bacaan tersimpan di Gaya saya, bisa dipilih kapan saja.</li>
         <li>✗ Musik, b-roll, stiker & emoji tidak ikut ditiru.</li>
       </ul>
@@ -317,7 +329,7 @@ function JobResult() {
         {r.ai ? (
           <div className="rounded-lg bg-muted/70 p-3 text-xs">
             <p className="mb-1 flex items-center gap-1.5 font-semibold">
-              <SparklesIcon className="size-3.5" /> Kata AI lokal ({r.ai.model})
+              <SparklesIcon className="size-3.5" /> Kata {r.ai.provider === "gemini" ? "Gemini" : "AI lokal"} ({r.ai.model})
             </p>
             <p className="text-muted-foreground">{r.ai.summary || "Tidak ada ringkasan."}</p>
           </div>
@@ -332,7 +344,7 @@ function JobResult() {
                   onClick={() => setSettingsOpen(true)}
                   className="font-medium text-foreground underline underline-offset-4"
                 >
-                  Siapkan AI lokal
+                  Siapkan AI
                 </button>
               )}
             </p>
@@ -440,7 +452,7 @@ function Detail({ s }: { s: StyleEntry }) {
           {s.preset
             ? "Gaya bawaan Nero. Pakai lalu ubah sesuai selera, kemudian simpan sebagai gaya Anda."
             : s.source?.kind === "referensi"
-              ? `Dibaca dari clip referensi${s.ai_model ? ` dengan AI lokal (${s.ai_model})` : " tanpa AI"}.`
+              ? `Dibaca dari clip referensi${s.ai_model ? ` dengan ${s.ai_provider === "gemini" ? "Gemini" : "AI lokal"} (${s.ai_model})` : " tanpa AI"}.`
               : "Disimpan dari pengaturan gaya Anda."}
         </DialogDescription>
       </DialogHeader>
@@ -487,9 +499,9 @@ function Detail({ s }: { s: StyleEntry }) {
               <Button
                 variant="outline"
                 onClick={reread}
-                title={localAIReady(localAI) ? "Baca ulang clip ini dengan AI lokal" : "Baca ulang clip ini"}
+                title={styleAI(localAI).ready ? `Baca ulang clip ini dengan ${styleAI(localAI).label}` : "Baca ulang clip ini"}
               >
-                <RotateCwIcon /> Baca ulang{localAIReady(localAI) && !s.ai_model ? " dengan AI" : ""}
+                <RotateCwIcon /> Baca ulang{styleAI(localAI).ready && !s.ai_model ? " dengan AI" : ""}
               </Button>
             )}
             {!s.preset && (

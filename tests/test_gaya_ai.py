@@ -16,6 +16,7 @@ import numpy as np
 from tests.util import ROOT  # noqa: F401  (menambahkan folder aplikasi ke sys.path)
 
 import common  # noqa: E402
+import gemini_ai  # noqa: E402
 import local_ai  # noqa: E402
 from features.clip import api as clip  # noqa: E402
 from features.clip import engine as core  # noqa: E402
@@ -87,22 +88,69 @@ class FakeOllama(BaseHTTPRequestHandler):
         if self.path == "/api/pull":
             return self._stream([{"status": "pulling manifest"}, {"status": "pulling", "total": 100, "completed": 40},
                                  {"status": "pulling", "total": 100, "completed": 100}, {"status": "success"}])
+        if self.path == "/v1beta/interactions":   # Gemini (Interactions API)
+            FakeOllama.headers_log.append(dict(self.headers))
+            key = self.headers.get("x-goog-api-key")
+            if key == "habis":
+                return self._json(429, {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "quota"}})
+            if key != "kunci-uji":
+                return self._json(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                                                  "message": "API key not valid. Please pass a valid API key."}})
+            text = json.dumps(GEMINI_ANSWER) if body.get("response_format") else "ok"
+            return self._json(200, {"status": "completed", "steps": [
+                {"type": "thought", "signature": "x"},
+                {"type": "model_output", "content": [{"type": "text", "text": text}]}]})
         self._json(404, {"error": "not found"})
 
 
+GEMINI_ANSWER = {**AI_ANSWER, "font_number": "2", "highlight_style": "color", "highlight_color": "green",
+                 "subtitle_animation": "bounce", "zoom": "punch", "name": "Hijau Memantul",
+                 "summary": "Dibaca Gemini dari videonya."}
+
+
 class WithOllama(unittest.TestCase):
+    """Server palsu yang menjawab seperti Ollama dan Gemini (tanpa internet)."""
+
     @classmethod
     def setUpClass(cls):
         cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeOllama)
         cls.url = f"http://127.0.0.1:{cls.srv.server_address[1]}"
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls._gemini = mock.patch.object(gemini_ai, "API_URL", f"{cls.url}/v1beta")
+        cls._gemini.start()
 
     @classmethod
     def tearDownClass(cls):
+        cls._gemini.stop()
         cls.srv.shutdown()
 
     def setUp(self):
-        FakeOllama.log, FakeOllama.reject_think = [], False
+        FakeOllama.log, FakeOllama.reject_think, FakeOllama.headers_log = [], False, []
+
+
+class Gemini(WithOllama):
+    def test_permintaan_video_gambar_skema(self):
+        got = gemini_ai.chat_json("tanya", {"type": "object"}, key="kunci-uji", model="gemini-3.8-flash",
+                                  images=[b"\xff\xd8gambar"], video=b"\x00\x00video", video_fps=4, system="sys")
+        self.assertEqual(got, GEMINI_ANSWER)
+        body = [b for p, b in FakeOllama.log if p == "/v1beta/interactions"][-1]
+        self.assertEqual(body["model"], "gemini-3.8-flash")
+        self.assertEqual([x["type"] for x in body["input"]], ["text", "video", "image", "text"])
+        self.assertEqual(body["input"][1]["processing"], {"type": "static", "fps": 4})
+        self.assertEqual(body["response_format"]["schema"], {"type": "object"})
+        self.assertEqual(body["response_format"]["mime_type"], "application/json")
+        h = FakeOllama.headers_log[-1]
+        self.assertEqual(h.get("x-goog-api-key"), "kunci-uji")
+        self.assertTrue(h.get("Api-Revision"))
+
+    def test_galat_jelas(self):
+        with self.assertRaises(local_ai.LocalAIError) as e:
+            gemini_ai.chat_json("x", {}, key="habis")
+        self.assertIn("Batas pemakaian gratis", str(e.exception))
+        self.assertIn("tidak valid", gemini_ai.check("salah")["error"])
+        self.assertEqual(gemini_ai.check("kunci-uji"), {"ok": True, "error": ""})
+        with self.assertRaises(local_ai.LocalAIError):
+            gemini_ai.chat_json("x", {}, key="")
 
 
 class LocalAI(WithOllama):
@@ -356,6 +404,46 @@ class PustakaGaya(WithOllama):
         self.assertEqual(mine[0]["id"], res["style_id"])
         self.assertEqual(mine[0]["source"]["kind"], "referensi")
         self.assertTrue(mine[0]["summary"])
+
+    def read_ref(self):
+        with open(self.ref, "rb") as f:
+            jid = self.post("/api/clip/style-jobs", content_type="multipart/form-data",
+                            data={"file": (io.BytesIO(f.read()), "contoh.mp4")})["id"]
+        job = self.wait_job(jid)
+        self.assertEqual(job["status"], "selesai", job.get("error"))
+        return job["result"]
+
+    def test_baca_gaya_dengan_gemini(self):
+        self.post("/api/settings", {"ai_provider": "gemini", "gemini_key": "kunci-uji"})
+        res = self.read_ref()
+        self.assertEqual(res["ai"]["provider"], "gemini")
+        self.assertEqual(res["ai"]["model"], "gemini-3.8-flash")
+        self.assertEqual(res["name"], "Hijau Memantul")
+        self.assertEqual(res["style"]["caption_anim"], "bounce")     # hanya terlihat dengan menonton video
+        self.assertEqual(res["sources"]["caption_anim"], "ai")
+        self.assertEqual(res["style"]["zoom"], "hentak")             # terukur dari piksel tetap didahulukan
+        self.assertEqual(res["style"]["caption_font"], "anton")      # baris 2 lembar font
+        body = [b for p, b in FakeOllama.log if p == "/v1beta/interactions"][-1]
+        self.assertIn("video", [x["type"] for x in body["input"]])
+        self.assertIn("subtitle_animation", body["response_format"]["schema"]["properties"])
+        self.assertFalse([p for p, _ in FakeOllama.log if p == "/api/chat"])   # AI lokal tidak dipakai
+
+    def test_gemini_habis_pindah_ke_ai_lokal(self):
+        self.post("/api/settings", {"ai_provider": "gemini", "gemini_key": "habis"})
+        res = self.read_ref()
+        self.assertEqual(res["ai"]["provider"], "lokal")
+        self.assertTrue(any("Batas pemakaian gratis" in n for n in res["notes"]))
+
+    def test_kunci_tidak_dikirim_ke_halaman(self):
+        self.post("/api/settings", {"gemini_key": "kunci-uji", "local_ai_key": "rahasia2", "api_key": "rahasia3"})
+        s = self.get("/api/settings")
+        self.assertTrue(s["has_gemini_key"] and s["has_local_ai_key"] and s["has_key"])
+        dump = json.dumps([s, self.get("/api/local-ai"), self.get("/api/clip/settings")])
+        for secret in ("kunci-uji", "rahasia2", "rahasia3"):
+            self.assertNotIn(secret, dump)
+        self.assertTrue(self.post("/api/gemini/check", {})["ok"])
+        self.post("/api/settings", {"clear_gemini_key": True})
+        self.assertFalse(self.get("/api/settings")["has_gemini_key"])
 
     def test_baca_gaya_tanpa_ai(self):
         common.update_settings({"local_ai_url": "http://127.0.0.1:9"})

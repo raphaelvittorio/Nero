@@ -114,6 +114,26 @@ Klik **Tiru gaya dari clip**, tempel link clip yang gaya editannya ingin ditiru 
 
 Angka hasil pengukuran selalu didahulukan; AI mengisi yang tidak bisa diukur. Di hasilnya, setiap pengaturan diberi tanda **UKUR** (diukur dari piksel) atau **AI**. Semua hasil bacaan **otomatis tersimpan di Gaya saya**, jadi bisa dipilih lagi kapan saja; tekan **Pakai gaya ini** untuk langsung memakainya. Gaya dari link bisa **dibaca ulang** (mis. setelah AI lokal disiapkan) lewat tombol **ⓘ** → **Baca ulang**.
 
+**Pilih AI-nya** di **Pengaturan → AI gratis untuk membaca & meniru gaya editing**:
+
+| | Google Gemini (disarankan) | AI lokal (Ollama) |
+|---|---|---|
+| Kepintaran | Model besar Google (Gemini 3.8 Flash) | Model kecil 2–4B |
+| Cara melihat | **Menonton videonya** (20 detik pertama), jadi animasi subtitle & zoom ikut terbaca | Beberapa gambar diam |
+| Butuh | Internet + API key gratis | Ollama + model di laptop |
+| Privasi | Potongan clip kecil tanpa suara dikirim ke Google; di paket gratis boleh dipakai Google untuk meningkatkan produknya | Video tidak keluar dari laptop |
+| Batas | Kuota gratis harian (cukup untuk pemakaian biasa) | Tidak ada |
+
+Bila Gemini gagal (kuota habis, tanpa internet), Nero otomatis memakai AI lokal, lalu pengukuran piksel saja.
+
+**Menyiapkan Gemini (sekali saja, gratis):**
+
+1. Di Pengaturan pilih **Google Gemini**, lalu klik **Buat API key gratis** (membuka Google AI Studio).
+2. Masuk dengan akun Google, tekan **Create API key**, lalu salin kuncinya.
+3. Tempel di kolom **API key Gemini**, tekan **Cek** (harus muncul "✓ API key berfungsi"), lalu **Simpan**.
+
+Kunci hanya disimpan di komputer Anda (`data/settings.json`) dan tidak pernah dikirim ke halaman. Server lain yang meniru API OpenAI dan butuh kunci (mis. OpenRouter atau Groq) juga bisa dipakai lewat bagian AI lokal: isi **Alamat server** (mis. `https://openrouter.ai/api/v1`) dan **API key server**.
+
 **Menyiapkan AI lokal (sekali saja, gratis):**
 
 1. Unduh & pasang **Ollama** dari https://ollama.com/download, lalu buka aplikasinya (berjalan di latar belakang).
@@ -151,7 +171,7 @@ Setelah semua clip selesai, tekan **🧹 Hapus video sumber** untuk menghemat di
 
 Ada dua jenis AI, keduanya opsional:
 
-- **AI lokal gratis (Ollama)**: berjalan di komputer Anda, tanpa API key. Di Clip Maker dipakai untuk membaca & meniru gaya editing dari clip referensi. Cara menyiapkannya ada di bagian *Tiru gaya dari clip referensi*.
+- **AI gratis untuk meniru gaya**: Google Gemini (online, API key gratis, paling pintar) atau AI lokal Ollama (offline). Di Clip Maker dipakai untuk membaca & meniru gaya editing dari clip referensi. Cara menyiapkannya ada di bagian *Tiru gaya dari clip referensi*.
 - **Claude API key** (berbayar): dijelaskan di bawah.
 
 Tanpa pengaturan apa pun, setiap fitur bekerja dengan algoritma lokal (gratis); di Clip Maker, momen dipilih otomatis di komputer Anda. Untuk hasil yang jauh lebih bagus (di Clip Maker: pemilihan momen, judul hook, dan caption), isi **Claude API key** di **Pengaturan** (menu kiri bawah). Kunci ini dipakai bersama oleh semua fitur. Kunci bisa dibuat di https://console.anthropic.com (berbayar per pemakaian; satu video biasanya hanya beberapa sen dolar). Kunci hanya disimpan di komputer Anda (`data/settings.json`).
@@ -167,6 +187,8 @@ Tanpa pengaturan apa pun, setiap fitur bekerja dengan algoritma lokal (gratis); 
 | Subtitle kurang tepat / malah diterjemahkan | Pastikan pilihan **Bahasa** saat menambahkan video sesuai bahasa yang diucapkan (atau pilih Deteksi otomatis), dan pakai model **medium**. |
 | Wajah tidak diikuti | Pilih tata letak **Ikuti wajah**, **Dua orang (atas/bawah)** untuk podcast, atau **Video utuh + latar blur** untuk video dengan banyak orang. |
 | "AI lokal belum berjalan" saat tiru gaya | Buka aplikasi Ollama (ikonnya ada di Start Menu), lalu di **Pengaturan** tekan **Cek lagi**. Gaya tetap bisa dibaca tanpa AI, hanya font & cara menyorot kata yang tidak ditiru. |
+| "Batas pemakaian gratis Gemini tercapai" | Kuota gratis harian/menit habis. Nero otomatis memakai AI lokal; kuota harian kembali tengah malam waktu Pasifik (± pukul 14.00–15.00 WIB). |
+| "API key Gemini tidak valid / ditolak" | Buat kunci baru di Google AI Studio, tempel di Pengaturan, tekan **Cek**. |
 | AI lokal lambat / "memori tidak cukup" | Pilih model yang lebih kecil (**qwen3-vl:2b-instruct**) di **Pengaturan → AI lokal gratis**. |
 | "Model selalu berpikir panjang" | Model yang terpilih adalah versi *thinking*. Unduh versi **-instruct** lalu pilih di Pengaturan. |
 
@@ -180,7 +202,8 @@ Nero/
   requirements*.txt daftar paket (lock = versi yang sudah teruji, gpu = pustaka CUDA)
   app.py            server web lokal: keamanan, tampilan, pengaturan umum, memuat semua fitur
   common.py         bagian bersama semua fitur (lokasi folder, pengaturan, hapus berkas)
-  local_ai.py       AI lokal gratis (Ollama / LM Studio), dipakai bersama semua fitur
+  local_ai.py       AI lokal gratis (Ollama / LM Studio / server bergaya OpenAI), dipakai bersama semua fitur
+  gemini_ai.py      Google Gemini (paket gratis, bisa menonton video), dipakai bersama semua fitur
   desktop.py        ikon Nero di Desktop & Start Menu, buka otomatis, berjalan tanpa jendela hitam
   features/         satu folder per fitur
     clip/           Clip Maker: api.py (rute, antrian, pustaka gaya), engine.py (unduh, transkrip, momen,

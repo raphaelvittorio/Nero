@@ -80,6 +80,10 @@ def _http_error(r: requests.Response, model: str = "") -> LocalAIError:
 # --------------------------------------------------------------------------
 # Status: server jenis apa, model apa saja yang ada
 # --------------------------------------------------------------------------
+def _auth(key: str | None) -> dict:
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
 _caps_cache: dict[tuple, tuple[bool, bool]] = {}
 
 
@@ -101,8 +105,9 @@ def _ollama_caps(url: str, name: str, digest: str) -> tuple[bool, bool]:
     return _caps_cache[key]
 
 
-def status(url: str | None = None) -> dict:
-    """{ok, kind: 'ollama'|'openai'|None, url, models:[{name, vision, size_gb}], error}"""
+def status(url: str | None = None, key: str | None = None) -> dict:
+    """{ok, kind: 'ollama'|'openai'|None, url, models:[{name, vision, size_gb}], error}.
+    key: kunci server bergaya OpenAI di internet (OpenRouter, Groq); tidak dipakai Ollama."""
     url = clean_url(url)
     try:
         r = requests.get(f"{url}/api/tags", timeout=3)
@@ -117,7 +122,7 @@ def status(url: str | None = None) -> dict:
     except (requests.RequestException, ValueError):
         pass
     try:
-        r = requests.get(f"{url}/v1/models", timeout=3)
+        r = requests.get(f"{url}/v1/models", timeout=5, headers=_auth(key))
         if r.ok:
             data = r.json().get("data") or []
             models = [{"name": m.get("id", ""), "size_gb": 0, "vision": bool(_VISION_HINT.search(m.get("id", ""))),
@@ -216,18 +221,19 @@ def _parse_json(text: str) -> dict:
 
 
 def chat_json(prompt: str, schema: dict, images: list[bytes] = (), *, url: str | None = None,
-              model: str, system: str = "", timeout: float = 900, alive=None, on_token=None) -> dict:
+              model: str, system: str = "", timeout: float = 900, alive=None, on_token=None,
+              key: str | None = None) -> dict:
     """Kirim pertanyaan (+ gambar JPEG/PNG) ke AI lokal, kembalikan jawaban berupa dict.
     alive(): dipanggil berkala, boleh melempar galat untuk membatalkan. on_token(n): jumlah potongan jawaban."""
     url = clean_url(url)
-    st = status(url)
+    st = status(url, key)
     if not st["ok"]:
         raise LocalAIError(st["error"])
     b64 = [base64.b64encode(x).decode("ascii") for x in images]
     try:
         if st["kind"] == "ollama":
             return _ollama_chat(url, model, system, prompt, b64, schema, timeout, alive, on_token)
-        return _openai_chat(url, model, system, prompt, b64, schema, timeout)
+        return _openai_chat(url, model, system, prompt, b64, schema, timeout, key)
     except LocalAIError:
         raise
     except Exception as e:
@@ -285,7 +291,7 @@ def _ollama_chat(url, model, system, prompt, b64, schema, timeout, alive, on_tok
     return _parse_json("".join(parts))
 
 
-def _openai_chat(url, model, system, prompt, b64, schema, timeout):
+def _openai_chat(url, model, system, prompt, b64, schema, timeout, key=None):
     content = [{"type": "text", "text": prompt}] + \
               [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{x}"}} for x in b64]
     msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": content}]
@@ -296,7 +302,7 @@ def _openai_chat(url, model, system, prompt, b64, schema, timeout):
         body = {"model": model, "messages": msgs, "temperature": 0, "stream": False}
         if fmt:
             body["response_format"] = fmt
-        r = requests.post(f"{url}/v1/chat/completions", json=body, timeout=(5, timeout))
+        r = requests.post(f"{url}/v1/chat/completions", json=body, timeout=(5, timeout), headers=_auth(key))
         if r.ok:
             text = r.json()["choices"][0]["message"].get("content") or ""
             return _parse_json(text)

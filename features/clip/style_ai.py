@@ -18,6 +18,7 @@ import subprocess
 
 import numpy as np
 
+import gemini_ai
 import local_ai
 
 from . import engine as core
@@ -37,6 +38,9 @@ LAYOUTS = {"face_crop": "face", "two_people_split": "split", "full_video_blurred
 LOOKS = {"natural": "asli", "vivid": "cerah", "warm": "hangat", "cool": "dingin", "black_white": "hitamputih",
          "cinematic": "sinematik", "faded": "pudar"}
 POSITIONS = {"top": 0.3, "upper_middle": 0.42, "middle": 0.5, "lower_middle": 0.62, "bottom": 0.75}
+# hanya bila AI menonton videonya (Gemini): hal yang tidak terlihat dari gambar diam
+ANIMS = {"pop": "pop", "bounce": "bounce", "slide_up": "naik", "none": "tanpa"}
+ZOOMS = {"none": "tanpa", "slow": "halus", "punch": "hentak"}
 
 # Petunjuk untuk model ditulis dalam bahasa Inggris: model kecil (2-8B) jauh lebih patuh dengan
 # instruksi berbahasa Inggris. Nama & ringkasan tetap diminta dalam bahasa Indonesia.
@@ -55,7 +59,8 @@ def available_fonts() -> list[str]:
     return out
 
 
-def schema(n_fonts: int) -> dict:
+def schema(n_fonts: int, video: bool = False) -> dict:
+    """Bentuk jawaban AI. video=True menambah pertanyaan yang hanya bisa dijawab dengan menonton (animasi, zoom)."""
     s = lambda *vals: {"type": "string", "enum": list(vals)}  # noqa: E731
     props = {
         "has_subtitles": {"type": "boolean"},
@@ -77,6 +82,10 @@ def schema(n_fonts: int) -> dict:
         "name": {"type": "string"},
         "summary": {"type": "string"},
     }
+    if video:
+        props = {**{k: v for k, v in props.items() if k not in ("name", "summary")},
+                 "subtitle_animation": s(*ANIMS), "zoom": s(*ZOOMS),
+                 "name": props["name"], "summary": props["summary"]}
     return {"type": "object", "properties": props, "required": list(props)}
 
 
@@ -254,11 +263,16 @@ def facts(style: dict, measure: dict) -> str:
     return "\n".join(out)
 
 
-def prompt(style: dict, measure: dict, n_frames: int, has_strip: bool, n_fonts: int) -> str:
-    imgs = [f"- Image 1: {n_frames} full frames from the video side by side (separated by white bars), "
-            "taken at different moments from left to right." if n_frames > 1 else
-            "- Image 1: a full frame from the video."]
-    k = 2
+def prompt(style: dict, measure: dict, n_frames: int, has_strip: bool, n_fonts: int, video: bool = False) -> str:
+    """video=True: AI menonton potongan videonya (Gemini); gambar setelahnya mulai dari Image 1."""
+    if video:
+        imgs = ["- The video: the first seconds of the clip (watch how the subtitles appear and how the camera moves)."]
+        k = 1
+    else:
+        imgs = [f"- Image 1: {n_frames} full frames from the video side by side (separated by white bars), "
+                "taken at different moments from left to right." if n_frames > 1 else
+                "- Image 1: a full frame from the video."]
+        k = 2
     if has_strip:
         imgs.append(f"- Image {k}: close-up strips of the subtitle area from several moments (stacked).")
         k += 1
@@ -286,9 +300,14 @@ Fill every field:
 - title_style: the fixed headline near the top: its box color, "text_only" if it has no box, "none" if there is no headline.
 - layout: how the footage fills the vertical frame.
 - color_look: the overall color grading of the footage (not the text).
-- emoji: true if emoji or stickers appear next to the subtitles.
+- emoji: true if emoji or stickers appear next to the subtitles.{VIDEO_FIELDS if video else ""}
 - name: a short catchy name for this style in Indonesian, 2-4 words, describing its look (for example "Podcast Kuning Tegas" or "Kotak Ungu Santai"). Do not copy any text written in the images.
 - summary: 1-2 short sentences in Indonesian that explain this editing style to a beginner. Describe the look, not what the people say."""
+
+
+VIDEO_FIELDS = """
+- subtitle_animation: how each new group of subtitle words appears. "pop" = quickly grows a little into place; "bounce" = grows bigger than normal, then settles back; "slide_up" = rises from below while fading in; "none" = appears instantly without motion.
+- zoom: camera zoom used by the editor. "punch" = sudden jumps between a normal and a closer framing (like jump cuts); "slow" = smooth slow zoom in/out; "none" = no editing zoom."""
 
 
 # --------------------------------------------------------------------------
@@ -360,6 +379,14 @@ def merge(measured: dict, ai: dict | None, measure: dict, fonts: list[str]) -> t
     look = LOOKS.get(ai.get("color_look"))
     if "filter" not in style and look and _look_ok(look, measure.get("color") or {}):
         put("filter", look)
+    # dari menonton video (Gemini): animasi muncul subtitle; zoom hanya bila gerak kamera tidak terukur
+    anim = ANIMS.get(ai.get("subtitle_animation"))
+    if anim and style.get("captions"):
+        put("caption_anim", anim)
+    zoom = ZOOMS.get(ai.get("zoom"))
+    if zoom and "zoom" not in style:
+        put("zoom", zoom)
+
     layout = LAYOUTS.get(ai.get("layout"))
     # "potong tengah" adalah tebakan cadangan pengukuran (mis. latar blur tidak terbaca karena zoom,
     # atau wajah tidak terdeteksi di video gelap), jadi penilaian AI boleh menggantinya
@@ -368,9 +395,35 @@ def merge(measured: dict, ai: dict | None, measure: dict, fonts: list[str]) -> t
     return style, src
 
 
-def analyze(path: str, *, ai_url: str | None, ai_model: str | None, use_ai: bool = True,
+GEMINI_SECONDS = 20   # bagian awal clip yang ditonton Gemini (cukup untuk melihat pola subtitle & zoom)
+GEMINI_FPS = 4.0      # frame per detik yang dilihat Gemini: cukup untuk menangkap animasi muncul subtitle
+
+
+def video_proxy(path: str, seconds: float) -> bytes | None:
+    """Salinan kecil clip untuk dikirim ke Gemini: 480 px, tanpa suara, paling lama GEMINI_SECONDS."""
+    import tempfile
+    out = os.path.join(tempfile.gettempdir(), f"nero_gaya_{os.getpid()}_{id(path)}.mp4")
+    try:
+        core.run_ffmpeg(["-i", path, "-t", f"{min(seconds, GEMINI_SECONDS):.1f}", "-vf", "scale=480:-2,fps=15", "-an",
+                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-pix_fmt", "yuv420p", out])
+        with open(out, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
+    finally:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+
+
+def analyze(path: str, *, ai: dict | None = None, use_ai: bool = True,
             stage=lambda label, x: None, alive=lambda: None) -> dict:
-    """Baca gaya clip referensi. Hasil: {style, sources, notes, seconds, ai: {model, name, summary} | None}."""
+    """Baca gaya clip referensi. ai: pengaturan umum Nero (ai_provider, gemini_key, gemini_model,
+    local_ai_url, local_ai_model, local_ai_key). Gemini dicoba lebih dulu bila dipilih; bila gagal (mis. kuota
+    gratis habis, tidak ada internet), AI lokal; bila itu pun tidak ada, pengukuran piksel saja.
+    Hasil: {style, sources, notes, seconds, ai: {provider, model, name, summary} | None}."""
+    ai = ai or {}
     stage("Mengukur subtitle, judul, tata letak & zoom...", 0.3)
     res = core.analyze_reference_style(path)
     alive()
@@ -381,39 +434,59 @@ def analyze(path: str, *, ai_url: str | None, ai_model: str | None, use_ai: bool
         notes.append("Dibaca tanpa AI: jenis font & cara menyorot kata tidak ditiru.")
         return out
 
-    st = local_ai.status(ai_url)
-    model = local_ai.pick_model(st, ai_model) if st["ok"] else None
-    if not st["ok"] or not model:
-        why = st["error"] if not st["ok"] else "Belum ada model AI yang bisa melihat gambar di Ollama."
-        notes.append(f"{why} Gaya dibaca tanpa AI: jenis font & cara menyorot kata tidak ditiru.")
-        out["ai_missing"] = True
-        return out
-
-    stage("Menyiapkan frame untuk AI...", 0.45)
+    stage("Menyiapkan gambar untuk AI...", 0.4)
     times = pick_times(measure, res["seconds"])
-    frames = frame_images(path, times)
-    together = contact_sheet(frames)
     strip = caption_strip(path, measure.get("caption_band"), times) if style.get("captions") else None
     fonts = available_fonts()
     sheet = font_sheet(fonts, style.get("caption_upper"))
-    images = ([together] if together else []) + ([strip] if strip else []) + [sheet]
     alive()
 
-    label = f"AI lokal ({model}) sedang melihat clip... Pertama kali bisa 1-3 menit."
-    stage(label, 0.55)
-    try:
-        ai = local_ai.chat_json(prompt(style, measure, len(frames), bool(strip), len(fonts)), schema(len(fonts)),
-                                images, url=ai_url, model=model, system=SYSTEM, alive=alive,
-                                on_token=lambda n: stage(label, min(0.95, 0.55 + n / 900)))
-    except local_ai.LocalAIError as e:
-        notes.append(f"{e} Gaya dibaca tanpa AI.")
-        return out
+    answer, used = None, None
+    if ai.get("ai_provider") == "gemini":
+        model = ai.get("gemini_model") or gemini_ai.DEFAULT_MODEL
+        stage(f"Gemini ({model}) sedang menonton clip...", 0.5)
+        try:
+            video = video_proxy(path, res["seconds"])
+            if not video:
+                raise local_ai.LocalAIError("Clip tidak bisa disiapkan untuk Gemini.")
+            alive()
+            answer = gemini_ai.chat_json(
+                prompt(style, measure, 0, bool(strip), len(fonts), video=True), schema(len(fonts), video=True),
+                key=ai.get("gemini_key", ""), model=model, video=video, video_fps=GEMINI_FPS,
+                images=([strip] if strip else []) + [sheet], system=SYSTEM, alive=alive)
+            used = {"provider": "gemini", "model": model}
+        except local_ai.LocalAIError as e:
+            notes.append(f"{e} Dicoba dengan AI lokal.")
     alive()
-    merged, sources = merge(style, ai, measure, fonts)
+
+    if answer is None:
+        st = local_ai.status(ai.get("local_ai_url"), ai.get("local_ai_key"))
+        model = local_ai.pick_model(st, ai.get("local_ai_model")) if st["ok"] else None
+        if not st["ok"] or not model:
+            why = st["error"] if not st["ok"] else "Belum ada model AI yang bisa melihat gambar di Ollama."
+            notes.append(f"{why} Gaya dibaca tanpa AI: jenis font & cara menyorot kata tidak ditiru.")
+            out["ai_missing"] = True
+            return out
+        frames = frame_images(path, times)
+        together = contact_sheet(frames)
+        images = ([together] if together else []) + ([strip] if strip else []) + [sheet]
+        label = f"AI lokal ({model}) sedang melihat clip... Pertama kali bisa 1-3 menit."
+        stage(label, 0.55)
+        try:
+            answer = local_ai.chat_json(prompt(style, measure, len(frames), bool(strip), len(fonts)),
+                                        schema(len(fonts)), images, url=ai.get("local_ai_url"), model=model,
+                                        key=ai.get("local_ai_key"), system=SYSTEM, alive=alive,
+                                        on_token=lambda n: stage(label, min(0.95, 0.55 + n / 900)))
+            used = {"provider": "lokal", "model": model}
+        except local_ai.LocalAIError as e:
+            notes.append(f"{e} Gaya dibaca tanpa AI.")
+            return out
+    alive()
+    merged, sources = merge(style, answer, measure, fonts)
     out.update(style=merged, sources=sources,
-               ai={"model": model, "name": clean_name(ai.get("name")), "summary": clean_summary(ai.get("summary"))})
-    if ai.get("emoji"):
+               ai={**used, "name": clean_name(answer.get("name")), "summary": clean_summary(answer.get("summary"))})
+    if answer.get("emoji"):
         notes.append("AI melihat emoji/stiker di samping subtitle; Nero belum bisa menambahkannya.")
-    if ai.get("has_subtitles") and not merged.get("captions"):
+    if answer.get("has_subtitles") and not merged.get("captions"):
         notes.append("AI melihat subtitle tetapi tidak bisa diukur; periksa pratinjau.")
     return out

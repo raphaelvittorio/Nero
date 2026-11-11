@@ -20,7 +20,7 @@ import { Label } from "@/components/ui/label";
 import { post } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-import { LocalAISection } from "./local-ai-section";
+import { GeminiSection, LocalAISection, ProviderPicker } from "./local-ai-section";
 import { useNero, type GlobalSettings } from "./store";
 
 /** "" (tidak memakai cookies) disimpan sebagai "none" karena Select butuh nilai tidak kosong. */
@@ -54,6 +54,10 @@ function SettingsForm({ settings }: { settings: GlobalSettings }) {
   const [aiUrl, setAiUrl] = useState(settings.local_ai_url);
   const [aiModel, setAiModel] = useState(settings.local_ai_model || "auto");
   const [aiOn, setAiOn] = useState(settings.local_ai_on);
+  const [aiKey, setAiKey] = useState("");
+  const [provider, setProvider] = useState(settings.ai_provider);
+  const [geminiKey, setGeminiKey] = useState("");
+  const [geminiModel, setGeminiModel] = useState(settings.gemini_model);
 
   async function save() {
     try {
@@ -64,6 +68,10 @@ function SettingsForm({ settings }: { settings: GlobalSettings }) {
         local_ai_url: aiUrl.trim(),
         local_ai_model: aiModel === "auto" ? "" : aiModel,
         local_ai_on: aiOn,
+        local_ai_key: aiKey,
+        ai_provider: provider,
+        gemini_key: geminiKey,
+        gemini_model: geminiModel.trim(),
         ...(settings.desktop && autostart !== settings.desktop.autostart ? { autostart } : {}),
       });
       setSettingsOpen(false);
@@ -128,14 +136,38 @@ function SettingsForm({ settings }: { settings: GlobalSettings }) {
           </Label>
           <SimpleSelect value={cookie} onChange={setCookie} options={COOKIE_BROWSERS} aria-label="Cookies browser" />
         </div>
-        <LocalAISection
-          url={aiUrl}
-          setUrl={setAiUrl}
-          model={aiModel}
-          setModel={setAiModel}
-          on={aiOn}
-          setOn={setAiOn}
-        />
+        <div className="flex flex-col gap-3 border-t pt-4">
+          <div>
+            <Label>AI gratis untuk membaca &amp; meniru gaya editing</Label>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Dipakai &ldquo;Tiru gaya dari clip&rdquo;. Bila pilihan utama gagal, Nero memakai yang lain.
+            </p>
+          </div>
+          <ProviderPicker value={provider} onChange={setProvider} />
+          {provider === "gemini" && (
+            <GeminiSection
+              keyValue={geminiKey}
+              setKey={setGeminiKey}
+              model={geminiModel}
+              setModel={setGeminiModel}
+              hasKey={settings.has_gemini_key}
+            />
+          )}
+          <LocalAISection
+            url={aiUrl}
+            setUrl={setAiUrl}
+            model={aiModel}
+            setModel={setAiModel}
+            serverKey={aiKey}
+            setServerKey={setAiKey}
+            hasServerKey={settings.has_local_ai_key}
+            title={provider === "gemini" ? "AI lokal (cadangan bila Gemini gagal)" : "AI lokal (Ollama)"}
+          />
+          <Label className="cursor-pointer font-normal">
+            <Checkbox checked={aiOn} onCheckedChange={(v) => setAiOn(v === true)} />
+            Pakai AI saat membaca gaya (matikan untuk pengukuran piksel saja)
+          </Label>
+        </div>
         {settings.desktop && (
           <div className={cn(field, "gap-3 border-t pt-4")}>
             <Label>Membuka Nero tanpa terminal</Label>

@@ -116,6 +116,7 @@ export interface StyleEntry {
   /** asal tiap kunci yang terbaca: pengukuran piksel atau penilaian AI */
   sources?: Partial<Record<keyof Style, StyleSource>>;
   ai_model?: string;
+  ai_provider?: "gemini" | "lokal" | "";
   notes?: string[];
   created?: number;
   /** kunci gambar contoh (berubah bila gaya / video contoh berubah) */
@@ -140,7 +141,7 @@ export interface StyleJobResult {
   sources: Partial<Record<keyof Style, StyleSource>>;
   notes: string[];
   seconds: number;
-  ai: null | { model: string; name: string; summary: string };
+  ai: null | { provider: "gemini" | "lokal"; model: string; name: string; summary: string };
   ai_missing?: boolean;
 }
 

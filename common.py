@@ -52,7 +52,14 @@ GLOBAL_DEFAULTS = {
     "local_ai_url": "http://127.0.0.1:11434",
     "local_ai_model": "",
     "local_ai_on": True,
+    # kunci untuk server bergaya OpenAI di internet (mis. OpenRouter, Groq); kosong untuk Ollama/LM Studio
+    "local_ai_key": "",
+    # AI untuk meniru gaya: "lokal" (Ollama, offline) atau "gemini" (Google, gratis online, lihat gemini_ai.py)
+    "ai_provider": "lokal",
+    "gemini_key": "",
+    "gemini_model": "gemini-3.8-flash",
 }
+SECRET_KEYS = ("api_key", "gemini_key", "local_ai_key")   # tidak pernah dikirim ke halaman
 _feature_defaults: dict[str, dict] = {}
 _settings_lock = threading.RLock()
 

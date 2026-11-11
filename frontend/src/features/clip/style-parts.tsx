@@ -279,7 +279,7 @@ export function DetectedList({
                 "ml-auto flex-none rounded px-1 py-px text-[9px] font-semibold tracking-wide uppercase",
                 sources[k] === "ai" ? "bg-foreground text-background" : "border text-muted-foreground",
               )}
-              title={sources[k] === "ai" ? "Dinilai AI lokal dari gambar" : "Diukur dari piksel video"}
+              title={sources[k] === "ai" ? "Dinilai AI (Gemini / AI lokal)" : "Diukur dari piksel video"}
             >
               {sources[k] === "ai" ? "AI" : "ukur"}
             </span>

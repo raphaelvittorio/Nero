@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
-import { localAIReady, useNero } from "@/components/nero/store";
+import { styleAI, useNero } from "@/components/nero/store";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -167,28 +167,27 @@ function StyleTile({ s, active }: { s: StyleEntry; active: boolean }) {
       {fromRef && (
         <p className="flex items-center gap-1 truncate text-[10px] text-muted-foreground">
           {s.ai_model && <SparklesIcon className="size-2.5 flex-none" />}
-          {s.ai_model ? "Dibaca AI" : "Dibaca tanpa AI"}
+          {!s.ai_model ? "Dibaca tanpa AI" : s.ai_provider === "gemini" ? "Dibaca Gemini" : "Dibaca AI lokal"}
         </p>
       )}
     </div>
   );
 }
 
-/** Tanda kecil: AI lokal siap / belum. Klik untuk membuka pengaturannya. */
+/** Tanda kecil: AI untuk meniru gaya siap / belum. Klik untuk membuka pengaturannya. */
 function AIStatus() {
   const { localAI, setSettingsOpen } = useNero();
-  if (!localAI) return null;
-  const ready = localAIReady(localAI);
-  if (!localAI.on) return null;
+  if (!localAI?.on) return null;
+  const ai = styleAI(localAI);
   return (
     <button
       type="button"
       onClick={() => setSettingsOpen(true)}
-      title={ready ? `Model: ${localAI.chosen}` : "Klik untuk menyiapkan AI lokal gratis"}
+      title={ai.ready ? `Membaca gaya dengan ${ai.label}` : "Klik untuk menyiapkan AI gratis"}
       className="flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
     >
-      <span className={cn("size-1.5 rounded-full", ready ? "bg-ok" : "bg-warn")} />
-      {ready ? "AI lokal siap" : "Siapkan AI lokal"}
+      <span className={cn("size-1.5 rounded-full", ai.ready ? "bg-ok" : "bg-warn")} />
+      {!ai.ready ? "Siapkan AI" : ai.kind === "gemini" ? "Gemini siap" : "AI lokal siap"}
     </button>
   );
 }

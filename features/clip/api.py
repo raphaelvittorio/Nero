@@ -1003,8 +1003,8 @@ def _run_style_job(jid, url, path, title, use_ai, replace_id):
                 stage("Mengunduh clip referensi...", 0.05)
                 info = core.download_reference(url, tmp, s.get("cookies_browser") or None, video=True)
                 path, title = info["path"], info["title"]
-            res = style_ai.analyze(path, ai_url=s.get("local_ai_url"), ai_model=s.get("local_ai_model"),
-                                   use_ai=use_ai and s.get("local_ai_on", True), stage=stage, alive=alive)
+            res = style_ai.analyze(path, ai=s, use_ai=use_ai and s.get("local_ai_on", True), stage=stage,
+                                   alive=alive)
         alive()
         # gaya lengkap: yang terbaca menimpa gaya aktif sekarang, sisanya tetap
         detected = res["style"]
@@ -1012,7 +1012,7 @@ def _run_style_job(jid, url, path, title, use_ai, replace_id):
         ai = res.get("ai") or {}
         meta = {"source": {"kind": "referensi", "title": str(title or "")[:150], "url": url or ""},
                 "detected": sorted(detected), "sources": res["sources"], "summary": ai.get("summary", ""),
-                "ai_model": ai.get("model", ""), "notes": res["notes"]}
+                "ai_model": ai.get("model", ""), "ai_provider": ai.get("provider", ""), "notes": res["notes"]}
         entry = None
         if replace_id:
             with styles_lock:

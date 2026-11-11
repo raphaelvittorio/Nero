@@ -13,7 +13,14 @@ export interface GlobalSettings {
   local_ai_url: string;
   /** "" = pilih otomatis model yang bisa melihat gambar */
   local_ai_model: string;
+  /** pakai AI saat membaca gaya (bila mati: pengukuran piksel saja) */
   local_ai_on: boolean;
+  /** kunci server bergaya OpenAI di internet (OpenRouter, Groq) sudah tersimpan */
+  has_local_ai_key: boolean;
+  /** AI untuk meniru gaya: Gemini (online, gratis) atau AI lokal (Ollama) */
+  ai_provider: "lokal" | "gemini";
+  has_gemini_key: boolean;
+  gemini_model: string;
   /** Ikon Nero di Desktop & buka otomatis saat Windows menyala (null bila bukan Windows). */
   desktop: { shortcut: boolean; autostart: boolean } | null;
 }
@@ -40,10 +47,20 @@ export interface LocalAIInfo {
   };
   recommended: { name: string; label: string; size_gb: number }[];
   pull: null | { model: string; status: "proses" | "selesai" | "gagal" | "batal"; progress: number; stage: string; error: string };
+  provider: "lokal" | "gemini";
+  gemini: { has_key: boolean; model: string; key_page: string };
 }
 
 /** AI lokal siap membaca gambar? */
 export const localAIReady = (ai: LocalAIInfo | null) => Boolean(ai?.on && ai.status.ok && ai.chosen);
+
+/** AI untuk meniru gaya yang akan dipakai sekarang: Gemini (bila dipilih & ada API key), AI lokal, atau tidak ada. */
+export function styleAI(ai: LocalAIInfo | null): { ready: boolean; kind: "gemini" | "lokal" | null; label: string } {
+  if (!ai?.on) return { ready: false, kind: null, label: "AI dimatikan" };
+  if (ai.provider === "gemini" && ai.gemini.has_key) return { ready: true, kind: "gemini", label: `Gemini (${ai.gemini.model})` };
+  if (localAIReady(ai)) return { ready: true, kind: "lokal", label: `AI lokal (${ai.chosen})` };
+  return { ready: false, kind: null, label: "AI belum siap" };
+}
 
 interface NeroStore {
   settings: GlobalSettings | null;
