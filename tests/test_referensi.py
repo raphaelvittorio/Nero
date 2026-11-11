@@ -9,7 +9,7 @@ import numpy as np
 
 from tests.util import fake_segments
 
-import clipper_core as core  # noqa: E402  (tests.util menambahkan folder aplikasi ke sys.path)
+from features.clip import engine as core  # noqa: E402  (tests.util menambahkan folder aplikasi ke sys.path)
 
 
 class ParseBrief(unittest.TestCase):
@@ -43,7 +43,7 @@ Jangan ambil bagian iklan atau sponsor.
 
 class AppHelpers(unittest.TestCase):
     def test_link_youtube(self):
-        import app
+        from features.clip import api as app
         self.assertEqual(app.youtube_id("https://youtu.be/vQodCxq7b9g?t=754"), "vQodCxq7b9g")
         self.assertEqual(app.youtube_id("https://www.youtube.com/watch?v=vQodCxq7b9g&t=12m34s"), "vQodCxq7b9g")
         self.assertEqual(app.url_time("https://youtu.be/x?t=754s"), 754)

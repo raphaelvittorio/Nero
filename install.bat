@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
-title ClipMaker - Instalasi
+title Nero - Instalasi
 cd /d "%~dp0"
 echo ============================================================
-echo   ClipMaker - Instalasi (cukup sekali)
+echo   Nero - Instalasi (cukup sekali)
 echo ============================================================
 echo.
 
@@ -47,13 +47,14 @@ if exist ".venv\Scripts\python.exe" (
   )
 )
 if not exist ".venv\Scripts\python.exe" %PY% -m venv .venv
-call ".venv\Scripts\activate.bat"
-python -m pip install --upgrade pip
+REM python lingkungan dipanggil langsung (tanpa activate.bat) supaya folder aplikasi aman di-rename/dipindah
+set "VPY=%~dp0.venv\Scripts\python.exe"
+"%VPY%" -m pip install --upgrade pip
 REM versi yang sudah terbukti jalan; bila tidak cocok dengan versi Python ini, pakai versi fleksibel
-python -m pip install -r requirements-lock.txt
+"%VPY%" -m pip install -r requirements-lock.txt
 if errorlevel 1 (
   echo       Versi terkunci tidak cocok dengan Python ini, memakai versi fleksibel...
-  python -m pip install -r requirements.txt
+  "%VPY%" -m pip install -r requirements.txt
   if errorlevel 1 (
     echo.
     echo GAGAL menginstal paket. Periksa koneksi internet lalu jalankan install.bat lagi.
@@ -66,14 +67,14 @@ REM ---- GPU NVIDIA: transkrip jauh lebih cepat ----
 where nvidia-smi >nul 2>nul
 if not errorlevel 1 (
   echo       Kartu NVIDIA terdeteksi: memasang pustaka CUDA, sekitar 1 GB...
-  python -m pip install -r requirements-gpu.txt
+  "%VPY%" -m pip install -r requirements-gpu.txt
   if errorlevel 1 echo       Pustaka GPU gagal dipasang. Aplikasi tetap jalan memakai CPU.
 )
 
 REM ---- 4. Unduh model transkrip sekarang supaya pemakaian pertama cepat ----
 echo [4/4] Mengunduh model transkrip (sekitar 500 MB, sekali saja)...
-python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8'); print('Model siap.')"
-python -c "import clipper_core as c; print('FFmpeg:', c.ffmpeg_exe()); print('Transkrip memakai:', 'GPU' if c.transcribe_device() == 'cuda' else 'CPU')"
+"%VPY%" -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8'); print('Model siap.')"
+"%VPY%" -c "from features.clip import engine as c; print('FFmpeg:', c.ffmpeg_exe()); print('Transkrip memakai:', 'GPU' if c.transcribe_device() == 'cuda' else 'CPU')"
 
 echo.
 echo ============================================================

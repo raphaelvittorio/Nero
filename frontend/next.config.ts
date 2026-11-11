@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 import { PHASE_DEVELOPMENT_SERVER } from "next/constants";
 
 // Backend Python (app.py). Saat `npm run dev`, permintaan API diteruskan ke sini.
-const FLASK = process.env.CLIPMAKER_API ?? "http://127.0.0.1:7860";
+const FLASK = process.env.NERO_API ?? "http://127.0.0.1:7860";
 
 export default function config(phase: string): NextConfig {
   // Tanpa cacheComponents/PPR: tidak bisa dipakai bersama output "export",
@@ -22,7 +22,7 @@ export default function config(phase: string): NextConfig {
     return {
       ...base,
       async rewrites() {
-        return ["/api/:path*", "/media/:path*", "/out/:path*"].map((source) => ({
+        return ["/api/:path*", "/out/:path*"].map((source) => ({
           source,
           destination: FLASK + source,
         }));

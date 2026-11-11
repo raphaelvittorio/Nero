@@ -2,15 +2,15 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "clipmaker",
+      "name": "nero",
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["app.py"],
-      "env": { "NO_BROWSER": "1", "PYTHONUNBUFFERED": "1", "CLIPMAKER_DEV_ORIGINS": "localhost:3000" },
+      "env": { "NO_BROWSER": "1", "PYTHONUNBUFFERED": "1", "NERO_DEV_ORIGINS": "localhost:3000" },
       "port": 7860,
       "autoPort": false
     },
     {
-      "name": "clipmaker-ui-dev",
+      "name": "nero-ui-dev",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "frontend", "run", "dev"],
       "port": 3000

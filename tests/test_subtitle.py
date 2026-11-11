@@ -4,7 +4,7 @@ import unittest
 
 from tests.util import fake_segments
 
-import clipper_core as core  # noqa: E402
+from features.clip import engine as core  # noqa: E402
 
 
 def seg(words, t0):

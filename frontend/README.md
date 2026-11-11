@@ -1,4 +1,4 @@
-# ClipMaker — tampilan
+# Nero — tampilan
 
 Next.js 16 (App Router) + React 19 + TypeScript + Tailwind CSS 4 + shadcn/ui (Base UI).
 
@@ -14,13 +14,22 @@ npm run lint
 npm run typecheck
 ```
 
-Saat `npm run dev`, jalankan app.py dengan `CLIPMAKER_DEV_ORIGINS=localhost:3000` supaya
+Saat `npm run dev`, jalankan app.py dengan `NERO_DEV_ORIGINS=localhost:3000` supaya
 permintaan POST dari server pengembangan tidak ditolak oleh pemeriksaan asal (CSRF).
-Alamat backend bisa diganti dengan variabel `CLIPMAKER_API`.
+Alamat backend bisa diganti dengan variabel `NERO_API`.
 
 ## Susunan kode
 
-- `src/app/` — layout dan halaman tunggal
-- `src/components/clipmaker/` — fitur aplikasi: kartu input, gaya, proyek, clip, dialog, state bersama (`store.tsx`)
+- `src/app/` — layout (kerangka Nero) dan halaman: `page.tsx` (Beranda), `clip/page.tsx` (Clip Maker)
+- `src/components/nero/` — kerangka aplikasi: menu samping, Beranda, pengaturan umum, state bersama (`store.tsx`)
+- `src/features/index.ts` — daftar fitur; menu dan kartu Beranda dibuat dari sini
+- `src/features/clip/` — fitur Clip Maker: kartu input, gaya, proyek, clip, dialog, state, tipe, pilihan
+- `src/components/fields.tsx` — input bersama (`SimpleSelect`, `CommitInput`)
 - `src/components/ui/` — komponen shadcn/ui
-- `src/lib/` — tipe data API, helper `api()`, format waktu, daftar pilihan
+- `src/lib/` — helper `api()` / `post()` / `openFolder()`, `cn()`
+
+## Menambah fitur
+
+1. Backend: buat `features/<id>/` (lihat `features/__init__.py`) dengan rute di bawah `/api/<id>`.
+2. Tampilan: taruh kodenya di `src/features/<id>/`, buat halaman `src/app/<id>/page.tsx`,
+   lalu tambahkan satu entri di `src/features/index.ts`. Menu samping dan Beranda langsung memuatnya.

@@ -1,5 +1,5 @@
-import { ClipMakerApp } from "@/components/clipmaker/clipmaker-app";
+import { Home } from "@/components/nero/home";
 
-export default function Home() {
-  return <ClipMakerApp />;
+export default function Page() {
+  return <Home />;
 }

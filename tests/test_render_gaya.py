@@ -8,7 +8,7 @@ import unittest
 
 from tests.util import ROOT  # noqa: F401  (menambahkan folder aplikasi ke sys.path)
 
-import clipper_core as core  # noqa: E402
+from features.clip import engine as core  # noqa: E402
 
 TITLE = "Kenapa bisnis pertamaku bangkrut?"
 VARIANTS = {
@@ -44,7 +44,7 @@ def fake_words(t0=0.3, rate=2.6, pause_after=None, pause=1.5):
 class RenderGaya(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="clipmaker-test-")
+        cls.tmp = tempfile.mkdtemp(prefix="nero-test-")
         cls.src = os.path.join(cls.tmp, "sumber.mp4")
         # video horizontal buatan: gradasi bergerak + bintik (seperti tekstur video asli) + nada
         core.run_ffmpeg(["-f", "lavfi", "-i", "gradients=s=1280x720:speed=0.03:n=3,noise=alls=25:allf=t+u",
