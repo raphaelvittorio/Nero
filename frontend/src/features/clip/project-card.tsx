@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils";
 
 import { API, fmt, isBusy, mediaUrl, projectRunning, sizeText } from "./api";
 import { ClipRow } from "./clip-row";
+import { StyleSelect } from "./style-parts";
 import { useStore } from "./store";
 import type { Project } from "./types";
 
@@ -79,6 +80,13 @@ export function ProjectCard({ p, onReanalyze }: { p: Project; onReanalyze: (pid:
     act(async () => {
       const r = await post(`${API}/project/${p.id}/render`);
       toast.success(`${r.count} clip masuk antrian render`);
+    });
+
+  const setStyle = (style_id: string | null) =>
+    act(async () => {
+      await post(`${API}/project/${p.id}/style`, { style_id });
+      const rendered = clips.some((c) => c.render_status === "selesai");
+      toast.success(rendered ? "Gaya video diganti. Render ulang clip untuk menerapkannya." : "Gaya video diganti");
     });
 
   const addManual = () =>
@@ -168,6 +176,13 @@ export function ProjectCard({ p, onReanalyze }: { p: Project; onReanalyze: (pid:
                 >
                   <RotateCwIcon /> Cari ulang + referensi
                 </Button>
+                <StyleSelect
+                  value={p.style_id}
+                  onChange={setStyle}
+                  size="sm"
+                  className="w-auto max-w-56 min-w-40"
+                  aria-label="Gaya untuk video ini"
+                />
               </>
             ) : (
               <Badge variant="secondary" className="h-auto whitespace-normal">

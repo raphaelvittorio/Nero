@@ -14,6 +14,29 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "frontend", "run", "dev"],
       "port": 3000
+    },
+    {
+      "name": "nero-uji",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["app.py"],
+      "env": {
+        "NO_BROWSER": "1",
+        "PYTHONUNBUFFERED": "1",
+        "PORT": "7861",
+        "NERO_DATA": "data-uji/data",
+        "NERO_OUTPUT": "data-uji/output",
+        "NERO_DEV_ORIGINS": "localhost:3001"
+      },
+      "port": 7861,
+      "autoPort": false
+    },
+    {
+      "name": "nero-ui-uji",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "frontend", "run", "dev", "--", "--port", "3001"],
+      "env": { "NERO_API": "http://127.0.0.1:7861" },
+      "port": 3001,
+      "autoPort": false
     }
   ]
 }

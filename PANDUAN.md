@@ -40,7 +40,7 @@ Folder aplikasi boleh diganti namanya (mis. `ClipMaker` menjadi `Nero`); tidak p
 
 Buka **Clip Maker** dari menu.
 
-1. **Masukkan video**: tempel satu atau banyak link (satu per baris), atau tarik file video dari komputer. Tentukan jumlah clip dan **bahasa** yang diucapkan di video, lalu tekan **Proses**.
+1. **Masukkan video**: tempel satu atau banyak link (satu per baris), atau tarik file video dari komputer. Tentukan jumlah clip, **bahasa** yang diucapkan di video, dan **Gaya video ini** (biarkan "Gaya aktif", atau pilih gaya lain khusus untuk video ini), lalu tekan **Proses**.
 2. Aplikasi akan mengunduh, membuat transkrip, dan mencari momen paling menarik. Setiap momen diberi **skor** dan **alasan**. Proses yang sedang berjalan bisa dihentikan dengan **✕ Batal**.
 3. Periksa daftar clip:
    - Ubah judul/hook (teks yang tampil di atas video).
@@ -49,11 +49,7 @@ Buka **Clip Maker** dari menu.
    - **Transkrip** untuk memilih kalimat sendiri lalu menjadikannya clip.
    - **Subtitle** untuk mengoreksi kata yang salah dengar (nama orang, istilah, bahasa gaul). Waktu tiap kata tetap dipakai, jadi sebaiknya hanya mengganti kata, jangan menambah/menghapus banyak. Koreksi tersimpan di transkrip proyek, jadi ikut berlaku untuk clip lain di bagian yang sama. Clip yang sudah dirender diberi tanda **Subtitle diubah, render ulang**.
    - Hapus centang clip yang tidak ingin dirender.
-4. Atur **Gaya video** (berlaku untuk semua render berikutnya). Tekan **👁 Pratinjau gaya** untuk melihat hasilnya di satu frame tanpa menunggu render. Lalu tekan **Render**. Analisis video lain tetap bisa berjalan bersamaan dengan render. Pilihan gaya subtitle:
-   - **Font**: Impact, Montserrat ExtraBold, Anton, Bebas Neue, Poppins ExtraBold, atau Arial Black. Juga dipakai untuk judul.
-   - **Warna teks** (warna dasar subtitle) dan **Warna sorotan kata** (kata yang sedang diucapkan).
-   - **Sorot kata kunci**: angka dan kata pemancing perhatian (rahasia, ternyata, juta, gagal, dll.) selalu berwarna sorotan dan sedikit lebih besar.
-   - **Hapus jeda**: diam lebih dari 0,3 atau 0,6 detik dibuang otomatis supaya tempo lebih rapat. Audio tetap sinkron, dan file `.srt` ikut menyesuaikan.
+4. Pilih gaya (lihat **Gaya video** di bawah), lalu tekan **Render**. Analisis video lain tetap bisa berjalan bersamaan dengan render. Gaya satu video bisa diganti kapan saja lewat pilihan gaya di baris tombol proyeknya; clip yang sudah dirender perlu dirender ulang.
 5. Hasil muncul di daftar dan tersimpan di folder `output\clip` (tombol **Folder hasil** di atas halaman Clip Maker). Untuk setiap clip ada:
    - `.mp4` video 1080×1920 siap upload
    - `.srt` subtitle terpisah
@@ -88,25 +84,59 @@ Link di kolom ini hanya menentukan **momen** yang dipotong, bukan tampilan edita
 
 Di bawah kolom muncul daftar **Dikenali** supaya Anda bisa memastikan setiap baris terbaca dengan benar. **Jumlah clip** adalah total: timeline dan titik Anda selalu masuk, sisanya diisi momen pilihan otomatis. Bila hanya ingin clip dari riset Anda, isi Jumlah clip sama dengan banyaknya timeline. Clip dari referensi diberi tanda **Timeline Anda**, **Titik riset Anda**, atau **Sama dengan clip referensi**.
 
-### Tiru gaya dari clip referensi (tanpa API key)
+### Gaya video
 
-Di kartu **2. Gaya video**, tempel link clip yang gaya editannya ingin ditiru (TikTok/Reels/Shorts) lalu tekan **Baca gaya**, atau pilih file video dengan tombol **File**. Aplikasi membaca 40 detik pertama clip itu di komputer Anda dan menebak:
+Kartu **2. Gaya video** berisi:
 
-- **Subtitle**: posisi, ukuran, jumlah kata per tampilan, HURUF BESAR atau tidak, warna teks dan warna sorotan kata
-- **Judul/hook**: ada atau tidak, warna kotaknya (putih/kuning/hitam), tampil sepanjang video atau hanya 3/5 detik pertama
-- **Progress bar** di bawah
-- **Tata letak**: ikuti wajah, dua orang (atas/bawah), video utuh + latar blur, atau potong tengah
+- **Gaya aktif**: dipakai untuk semua video, kecuali video yang diberi gaya sendiri. **Atur detail** membuka pengaturan lengkap dengan pratinjau langsung di sebelahnya; setiap perubahan tersimpan otomatis. **Simpan** menyimpan gaya aktif ke Gaya saya.
+- **Tiru gaya dari clip**: baca gaya editing dari clip orang lain (lihat bagian berikut).
+- **Gaya saya**: semua gaya yang pernah Anda baca dari clip atau simpan sendiri. **Siap pakai**: 11 gaya bawaan (Klasik Kuning, Tegas Hijau, Kotak Ungu, Karaoke Biru, Satu Kata Cepat, Minimalis Putih, Gaya Berita, Sinematik, Santai Lucu, Neon Pink, Hitam Putih). Klik gambar untuk memakainya; tombol **ⓘ** di pojok gambar untuk melihat detail, mengganti nama, membaca ulang, atau menghapus.
 
-Hasilnya ditampilkan dulu: nilai yang berbeda dari pengaturan sekarang dicetak tebal. Tekan **Pratinjau dulu** untuk melihat satu frame, lalu **Terapkan gaya ini** bila cocok. Bagian yang tidak terbaca dengan yakin tidak diubah.
+Watermark @akun, letaknya, dan perataan volume adalah milik Anda: tidak berubah saat gaya diganti.
 
-Batasannya: hanya untuk video vertikal 9:16, dan paling akurat untuk subtitle ber-outline hitam (gaya TikTok umumnya). Jenis font, animasi teks, zoom, musik, b-roll, dan watermark tidak bisa ditiru. Ukuran subtitle dikalibrasi untuk font Impact; dengan font lain bisa meleset sekitar 15%. HURUF BESAR/kecil hanya diubah bila terbaca pasti; subtitle Impact huruf kecil satu kata per tampilan bisa terbaca sebagai HURUF BESAR. Bila video aslinya sendiri banyak tulisan (slide, berita), hasil subtitle/judul bisa keliru, jadi periksa pratinjaunya sebelum menerapkan.
+Pilihan di **Atur detail**:
+
+| Bagian | Pilihan |
+|---|---|
+| Subtitle | Font (Impact, Anton, Bebas Neue, Montserrat, Poppins, Arial Black, Segoe UI Black, Bahnschrift, Verdana, Georgia, Comic Sans; contohnya tampil dengan huruf aslinya), warna teks & warna sorotan (9 warna), **cara menyorot kata** (kata berwarna, kotak berwarna di belakang kata, karaoke, tanpa sorotan), kata per tampilan (1–4), **animasi muncul** (pop, memantul, naik perlahan, tanpa), **garis tepi** (tanpa/tipis/sedang/tebal), ukuran, posisi, HURUF BESAR, sorot kata kunci & angka, bayangan, kotak gelap di belakang subtitle |
+| Judul | Ada/tidak, kotak putih/kuning/merah/hitam atau tulisan saja, lama tampil, **ukuran**, **posisi** |
+| Video & efek | Tata letak (ikuti wajah, dua orang, video utuh + latar blur, **video utuh + latar hitam**, potong tengah), **zoom** (pelan maju-mundur, atau **zoom hentak** yang berganti dekat/jauh di akhir kalimat seperti jump cut), **filter warna** (cerah, hangat, dingin, sinematik, pudar, hitam putih), hapus jeda diam, progress bar di bawah atau **di atas** |
+| Watermark & suara | Watermark @akun di bawah atau di atas, ratakan volume suara |
+
+**Sorot kata kunci**: angka dan kata pemancing perhatian (rahasia, ternyata, juta, gagal, dll.) selalu berwarna sorotan dan sedikit lebih besar. **Hapus jeda**: diam lebih dari 0,3 atau 0,6 detik dibuang otomatis; audio tetap sinkron dan `.srt` ikut menyesuaikan.
+
+### Tiru gaya dari clip referensi (AI lokal gratis)
+
+Klik **Tiru gaya dari clip**, tempel link clip yang gaya editannya ingin ditiru (TikTok/Reels/Shorts) lalu tekan **Baca gaya**, atau **Pilih file**. Pembacaan berjalan di latar belakang (jendelanya boleh ditutup) dalam dua lapis:
+
+1. **Pengukuran piksel** (selalu, tanpa AI): posisi & ukuran subtitle, jumlah kata per tampilan, HURUF BESAR, warna teks & sorotan, judul (ada/tidak, warna kotak, lama tampil), progress bar, tata letak (termasuk latar hitam), **zoom hentak / zoom pelan**, dan video hitam-putih.
+2. **AI lokal gratis** (bila sudah disiapkan): melihat beberapa frame, potongan area subtitle, dan lembar contoh font Nero, lalu menilai **jenis font**, **cara menyorot kata** (warna/kotak/karaoke), garis tepi, bayangan, kotak gelap, gaya judul, nuansa warna, plus memberi **nama** dan **ringkasan** gayanya.
+
+Angka hasil pengukuran selalu didahulukan; AI mengisi yang tidak bisa diukur. Di hasilnya, setiap pengaturan diberi tanda **UKUR** (diukur dari piksel) atau **AI**. Semua hasil bacaan **otomatis tersimpan di Gaya saya**, jadi bisa dipilih lagi kapan saja; tekan **Pakai gaya ini** untuk langsung memakainya. Gaya dari link bisa **dibaca ulang** (mis. setelah AI lokal disiapkan) lewat tombol **ⓘ** → **Baca ulang**.
+
+**Menyiapkan AI lokal (sekali saja, gratis):**
+
+1. Unduh & pasang **Ollama** dari https://ollama.com/download, lalu buka aplikasinya (berjalan di latar belakang).
+2. Di Nero buka **Pengaturan** (menu kiri bawah) → bagian **AI lokal gratis**, tekan **Cek lagi**, lalu **Unduh** salah satu model:
+   - **qwen3-vl:4b-instruct** (± 3,3 GB): disarankan. Di RTX 3050 4 GB ± 35 detik per clip; nama & ringkasan gayanya paling rapi.
+   - **qwen3-vl:2b-instruct** (± 1,9 GB): ± 3× lebih cepat (± 12 detik per clip) dengan hasil pengaturan yang hampir sama, tetapi nama & ringkasannya kurang bagus. Cocok untuk laptop tanpa GPU.
+   - **qwen3-vl:8b-instruct** (± 6 GB): paling teliti, butuh GPU 8 GB atau lebih.
+
+   Pakai versi berakhiran **-instruct**. Tag `qwen3-vl:4b` tanpa akhiran adalah versi *thinking* yang selalu "berpikir" ribuan kata dulu, sehingga satu clip bisa 5–10 menit; Nero menghentikannya dan memberi tahu bila model seperti itu terpilih.
+3. Selesai. Tanda **AI lokal siap** muncul di kartu Gaya video. Pertama kali membaca bisa 1–3 menit selagi model dimuat; berikutnya lebih cepat.
+
+Video tidak dikirim ke internet: AI berjalan di komputer Anda. Setelah membaca, model dilepas dari memori GPU dalam 1 menit supaya transkrip video tetap memakai GPU. Bila kedua model terpasang, **Otomatis** memakai yang 4B; pilih yang lain di **Model yang dipakai**. Server lain yang meniru API OpenAI (mis. LM Studio di `http://127.0.0.1:1234`) juga bisa dipakai: isi **Alamat server** di Pengaturan.
+
+Batasannya: hanya untuk video vertikal 9:16, dan pengukuran paling akurat untuk subtitle ber-outline hitam (gaya TikTok umumnya). Musik, b-roll, stiker, dan emoji tidak ditiru. AI kecil kadang salah menebak font atau warna, jadi periksa pratinjaunya; semua pengaturan bisa diubah di **Atur detail**. Bila video aslinya banyak tulisan (slide, berita), hasil subtitle/judul bisa keliru.
 
 Setelah semua clip selesai, tekan **🧹 Hapus video sumber** untuk menghemat disk (video asli bisa ratusan MB). Hasil render tetap aman, tetapi clip proyek itu tidak bisa dirender ulang.
 
 ### Kemampuan Clip Maker
 
 - Deteksi momen menarik otomatis (hook kalimat pembuka, pertanyaan, kata kunci emosional, energi suara, kepadatan bicara)
-- Subtitle otomatis gaya TikTok: 1–4 kata per tampilan, kata yang diucapkan disorot warna, efek muncul
+- Subtitle otomatis gaya TikTok: 1–4 kata per tampilan, sorotan warna / kotak / karaoke, animasi muncul
+- 11 gaya siap pakai, pustaka **Gaya saya**, dan tiru gaya dari clip referensi dengan AI lokal gratis
+- Efek video: zoom hentak / zoom pelan, filter warna, latar blur atau hitam
 - Crop pintar 9:16 mengikuti wajah pembicara dengan gerakan kamera halus
 - Tata letak **Dua orang (atas/bawah)** untuk podcast/wawancara: tiap orang mendapat setengah layar (dipilih otomatis bila terdeteksi dua wajah berdampingan)
 - Tata letak alternatif: video utuh dengan latar blur, atau potong tengah
@@ -118,6 +148,11 @@ Setelah semua clip selesai, tekan **🧹 Hapus video sumber** untuk menghemat di
 - Caption + hashtag siap salin
 
 ## Mode AI (opsional, lebih pintar)
+
+Ada dua jenis AI, keduanya opsional:
+
+- **AI lokal gratis (Ollama)**: berjalan di komputer Anda, tanpa API key. Di Clip Maker dipakai untuk membaca & meniru gaya editing dari clip referensi. Cara menyiapkannya ada di bagian *Tiru gaya dari clip referensi*.
+- **Claude API key** (berbayar): dijelaskan di bawah.
 
 Tanpa pengaturan apa pun, setiap fitur bekerja dengan algoritma lokal (gratis); di Clip Maker, momen dipilih otomatis di komputer Anda. Untuk hasil yang jauh lebih bagus (di Clip Maker: pemilihan momen, judul hook, dan caption), isi **Claude API key** di **Pengaturan** (menu kiri bawah). Kunci ini dipakai bersama oleh semua fitur. Kunci bisa dibuat di https://console.anthropic.com (berbayar per pemakaian; satu video biasanya hanya beberapa sen dolar). Kunci hanya disimpan di komputer Anda (`data/settings.json`).
 
@@ -131,6 +166,9 @@ Tanpa pengaturan apa pun, setiap fitur bekerja dengan algoritma lokal (gratis); 
 | Transkrip lambat | Lihat baris di bawah tombol Proses: bila tertulis "memakai CPU" padahal ada kartu NVIDIA, jalankan **install.bat** lagi. Atau di **Pengaturan clip** ganti model transkrip ke **base**. Dengan GPU, pakai **large-v3-turbo**: hampir seakurat large-v3 tetapi jauh lebih cepat. |
 | Subtitle kurang tepat / malah diterjemahkan | Pastikan pilihan **Bahasa** saat menambahkan video sesuai bahasa yang diucapkan (atau pilih Deteksi otomatis), dan pakai model **medium**. |
 | Wajah tidak diikuti | Pilih tata letak **Ikuti wajah**, **Dua orang (atas/bawah)** untuk podcast, atau **Video utuh + latar blur** untuk video dengan banyak orang. |
+| "AI lokal belum berjalan" saat tiru gaya | Buka aplikasi Ollama (ikonnya ada di Start Menu), lalu di **Pengaturan** tekan **Cek lagi**. Gaya tetap bisa dibaca tanpa AI, hanya font & cara menyorot kata yang tidak ditiru. |
+| AI lokal lambat / "memori tidak cukup" | Pilih model yang lebih kecil (**qwen3-vl:2b-instruct**) di **Pengaturan → AI lokal gratis**. |
+| "Model selalu berpikir panjang" | Model yang terpilih adalah versi *thinking*. Unduh versi **-instruct** lalu pilih di Pengaturan. |
 
 Gunakan aplikasi ini untuk video milik Anda sendiri atau yang Anda punya izin untuk mengunggah ulang.
 
@@ -142,9 +180,11 @@ Nero/
   requirements*.txt daftar paket (lock = versi yang sudah teruji, gpu = pustaka CUDA)
   app.py            server web lokal: keamanan, tampilan, pengaturan umum, memuat semua fitur
   common.py         bagian bersama semua fitur (lokasi folder, pengaturan, hapus berkas)
+  local_ai.py       AI lokal gratis (Ollama / LM Studio), dipakai bersama semua fitur
   desktop.py        ikon Nero di Desktop & Start Menu, buka otomatis, berjalan tanpa jendela hitam
   features/         satu folder per fitur
-    clip/           Clip Maker: api.py (rute & antrian), engine.py (unduh, transkrip, momen, render)
+    clip/           Clip Maker: api.py (rute, antrian, pustaka gaya), engine.py (unduh, transkrip, momen,
+                    render, ukur gaya), style_ai.py (baca gaya dengan AI lokal), presets.py (gaya siap pakai)
   web/              tampilan aplikasi siap pakai (hasil build frontend/, jangan diubah langsung)
   frontend/         kode sumber tampilan: Next.js + TypeScript + Tailwind CSS + shadcn/ui
   models/           model deteksi wajah
@@ -167,6 +207,8 @@ Pemakai biasa tidak perlu Node.js: tampilan yang sudah jadi ada di folder `web/`
    Di terminal lain, dari folder `frontend`: `npm run dev`, lalu buka http://localhost:3000. Perubahan kode langsung terlihat; permintaan `/api` dan `/out` diteruskan ke app.py di port 7860.
 3. Setelah selesai: `npm run build` di folder `frontend`. Hasilnya otomatis disalin ke `web/`, lalu `run.bat` memakai tampilan baru.
 
+Untuk mencoba tanpa menyentuh data Anda, jalankan Nero kedua dengan folder data terpisah: variabel `NERO_DATA` dan `NERO_OUTPUT` (mis. `data-uji\data` dan `data-uji\output`, folder `data-uji/` tidak ikut git) dan `PORT=7861`. Konfigurasi `nero-uji` & `nero-ui-uji` di `.claude/launch.json` sudah mengaturnya.
+
 ### Menambah fitur baru
 
 Setiap fitur berdiri sendiri, jadi fitur baru tidak mengganggu yang lama:
@@ -182,4 +224,4 @@ Dari folder `Nero`:
 .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-Tes memakai transkrip, video, dan folder buatan (tidak menyentuh isi folder `data/` atau `output/` Anda), termasuk memindahkan data ClipMaker versi lama dan me-render beberapa clip bergaya diketahui lalu membacanya kembali dengan "Tiru gaya". Butuh sekitar 1 menit.
+Tes memakai transkrip, video, dan folder buatan (tidak menyentuh isi folder `data/` atau `output/` Anda), termasuk memindahkan data ClipMaker versi lama, me-render beberapa clip bergaya diketahui lalu membacanya kembali dengan "Tiru gaya", dan Ollama palsu untuk menguji jalur AI lokal tanpa internet. Butuh sekitar 1,5 menit.

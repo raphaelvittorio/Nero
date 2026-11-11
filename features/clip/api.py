@@ -23,11 +23,15 @@ import common
 from common import dir_size_mb, remove_files, remove_later, safe_name
 
 from . import engine as core
+from . import style_ai
+from .presets import DEFAULT_STYLE, PRESET_BY_ID, PRESETS, apply_look, look_of
 
 ID = "clip"
 DATA = common.data_dir(ID)
 PROJ = os.path.join(DATA, "projects")
 OUTPUT = common.output_dir(ID)
+STYLES_PATH = os.path.join(DATA, "styles.json")   # pustaka "Gaya saya"
+THUMBS = os.path.join(DATA, "thumbs")             # gambar contoh tiap gaya (bisa dibuat ulang)
 os.makedirs(PROJ, exist_ok=True)
 
 # Bagian "clip" di data/settings.json. API key, model AI, dan cookies browser ada di pengaturan umum Nero.
@@ -38,13 +42,9 @@ SETTINGS = {
     "min_len": 20,
     "max_len": 60,
     "auto_render": False,
-    "style": {
-        "layout": "auto", "captions": True, "caption_color": "kuning", "caption_upper": True,
-        "caption_size": 86, "caption_pos": 0.68, "caption_words": 3,
-        "title_on": True, "title_secs": 0, "title_bg": "putih", "title_size": 64,
-        "progress_bar": True, "handle": "", "loudnorm": True,
-        "caption_font": "impact", "caption_base": "putih", "caption_emphasis": False, "cut_pauses": 0,
-    },
+    "style": dict(DEFAULT_STYLE),
+    # gaya pustaka / preset yang terakhir dipakai sebagai gaya aktif ("" = diatur sendiri)
+    "active_style_id": "",
 }
 LANGUAGES = {"id", "en", "auto", "ms", "jv"}
 
@@ -405,8 +405,7 @@ def do_render(pid, cid, token):
         c["render_status"], c["error"] = "gagal", "Video sumber sudah dihapus."
         save_project(p)
         return
-    s = load_settings()
-    style = {**s["style"], **(p.get("style") or {})}
+    style = project_style(p, load_settings())
     out = None
     try:
         c["render_status"], c["render_progress"], c["error"] = "proses", 0, ""
@@ -499,16 +498,113 @@ def clean_brief(v):
     return str(v or "").strip()[:BRIEF_LIMIT]
 
 
-def new_project(url=None, source=None, title=None, n_clips=None, auto_render=False, language=None, brief=None):
+def new_project(url=None, source=None, title=None, n_clips=None, auto_render=False, language=None, brief=None,
+                style_id=None):
     pid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     os.makedirs(pdir(pid), exist_ok=True)
     p = {"id": pid, "url": url, "source": source, "title": title or url or "Video",
          "status": "antri", "stage": "Menunggu giliran...", "progress": 0, "clips": [],
          "created": time.time(), "n_clips": n_clips, "auto_render": auto_render, "error": "",
-         "language": language if language in LANGUAGES else None, "brief": clean_brief(brief)}
+         "language": language if language in LANGUAGES else None, "brief": clean_brief(brief),
+         "style_id": style_id if find_style(style_id) else None}
     projects[pid] = p
     save_project(p)
     return p
+
+
+# --------------------------------------------------------------------------
+# Pustaka gaya: "Gaya saya" (data/clip/styles.json) + preset bawaan
+# --------------------------------------------------------------------------
+styles_lock = threading.RLock()
+
+
+def load_styles() -> list[dict]:
+    with styles_lock:
+        if os.path.exists(STYLES_PATH):
+            try:
+                with open(STYLES_PATH, encoding="utf-8") as f:
+                    data = json.load(f)
+                return data if isinstance(data, list) else []
+            except Exception:
+                traceback.print_exc()
+        return []
+
+
+def save_styles(items: list[dict]) -> None:
+    with styles_lock:
+        tmp = STYLES_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, STYLES_PATH)
+
+
+def find_style(sid) -> dict | None:
+    if not sid:
+        return None
+    if sid in PRESET_BY_ID:
+        return PRESET_BY_ID[sid]
+    return next((x for x in load_styles() if x["id"] == sid), None)
+
+
+def project_style(p, s) -> dict:
+    """Gaya untuk merender clip proyek ini: gaya pilihan proyek (dari pustaka) atau gaya aktif."""
+    cur = {**DEFAULT_STYLE, **s["style"]}
+    chosen = find_style(p.get("style_id"))
+    if chosen:
+        return apply_look(cur, chosen["style"])
+    return {**cur, **(p.get("style") or {})}
+
+
+def clean_style_name(v, fallback="Gaya baru") -> str:
+    return re.sub(r"\s+", " ", str(v or "")).strip()[:40] or fallback
+
+
+def add_style(name, style, **meta) -> dict:
+    with styles_lock:
+        items = load_styles()
+        names = {x["name"] for x in items}
+        base, k = clean_style_name(name), 2
+        name = base
+        while name in names:  # nama kembar diberi nomor
+            name = f"{base} {k}"
+            k += 1
+        entry = {"id": uuid.uuid4().hex[:10], "name": name, "style": look_of(style), "created": int(time.time()),
+                 **meta}
+        items.insert(0, entry)
+        save_styles(items)
+    return entry
+
+
+def _preview_source(pid=None):
+    """Proyek, detik, dan clip untuk frame contoh: proyek `pid` atau proyek siap terbaru yang videonya masih ada.
+    (None, 0, None) = belum ada video, pakai latar contoh."""
+    cands = [projects[pid]] if pid in projects else sorted(projects.values(), key=lambda x: -x.get("created", 0))
+    for p in cands:
+        if p.get("status") == "siap" and p.get("source") and os.path.exists(os.path.join(pdir(p["id"]), p["source"])):
+            clip = (p.get("clips") or [None])[0]
+            t = clip["start"] + 1.0 if clip else (p.get("duration") or 10) * 0.3
+            return p, t, clip
+    return None, 0.0, None
+
+
+def preview_jpeg(style: dict, pid=None, width=core.OUT_W // 2) -> bytes:
+    """Satu frame contoh dengan gaya ini (dipakai pratinjau & gambar kartu gaya)."""
+    p, t, clip = _preview_source(pid)
+    if p:
+        words = [w for w in all_words(segments_of(p)) if t - 0.05 <= w["start"] < t + 4]
+        title = (clip or {}).get("title") or p.get("title", "")
+        return core.render_preview(os.path.join(pdir(p["id"]), p["source"]), t, words, style, title, width)
+    return core.render_preview(None, 0, [], style, "Contoh judul hook yang menarik", width)
+
+
+def thumb_key(style: dict, src=None) -> str:
+    """Kunci gambar contoh: berubah bila gayanya atau video contohnya berubah."""
+    p, t, _ = src or _preview_source()
+    raw = json.dumps([look_of(style), p["id"] if p else "", round(t, 2), THUMB_W], sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+THUMB_W = 270  # lebar gambar kartu gaya (px)
 
 
 # --------------------------------------------------------------------------
@@ -553,7 +649,7 @@ def add_links():
         return jsonify(error="Tidak ada link yang valid."), 400
     for url in links:
         p = new_project(url=url, n_clips=body.get("n_clips"), auto_render=body.get("auto_render", False),
-                        language=body.get("language"), brief=body.get("brief"))
+                        language=body.get("language"), brief=body.get("brief"), style_id=body.get("style_id"))
         queue_analyze(p["id"])
     return jsonify(ok=True, count=len(links))
 
@@ -566,8 +662,9 @@ def upload():
     title = os.path.splitext(f.filename)[0]
     p = new_project(title=title, n_clips=request.form.get("n_clips", type=int),
                     auto_render=request.form.get("auto_render") == "true",
-                    language=request.form.get("language"), brief=request.form.get("brief"))
-    ext =os.path.splitext(f.filename)[1].lower() or ".mp4"
+                    language=request.form.get("language"), brief=request.form.get("brief"),
+                    style_id=request.form.get("style_id"))
+    ext = os.path.splitext(f.filename)[1].lower() or ".mp4"
     f.save(os.path.join(pdir(p["id"]), "source" + ext))
     p["source"] = "source" + ext
     save_project(p)
@@ -764,56 +861,238 @@ def render_all():
 def preview_style():
     """Satu frame contoh dengan gaya saat ini, supaya tidak perlu render ulang hanya untuk mencoba gaya."""
     body = request.get_json(silent=True) or {}
-    s = load_settings()
-    style = {**s["style"], **(body.get("style") or {})}
-    pid = body.get("pid")
-    cands = [projects[pid]] if pid in projects else sorted(projects.values(), key=lambda x: -x.get("created", 0))
-    p = next((x for x in cands if x.get("status") == "siap" and x.get("source")
-              and os.path.exists(os.path.join(pdir(x["id"]), x["source"]))), None)
+    style = {**load_settings()["style"], **(body.get("style") or {})}
     try:
-        if p:
-            clip = (p.get("clips") or [None])[0]
-            t = clip["start"] + 1.0 if clip else (p.get("duration") or 10) * 0.3
-            words = [w for w in all_words(segments_of(p)) if t - 0.05 <= w["start"] < t + 4]
-            title = (clip or {}).get("title") or p.get("title", "")
-            jpg = core.render_preview(os.path.join(pdir(p["id"]), p["source"]), t, words, style, title)
-        else:
-            jpg = core.render_preview(None, 0, [], style, "Contoh judul hook yang menarik")
+        jpg = preview_jpeg(style, body.get("pid"))
     except Exception as e:
         traceback.print_exc()
         return jsonify(error=f"Pratinjau gagal: {e}"[:300]), 500
     return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
-@bp.post("/style-from-reference")
-def style_from_reference():
-    """Tiru gaya dari clip referensi (link atau file), tanpa AI. Hanya mengembalikan gaya yang terdeteksi;
-    pengaturan baru disimpan setelah pengguna menekan Terapkan."""
+@bp.get("/styles")
+def list_styles():
+    """Gaya saya + preset bawaan + gaya mana yang sedang aktif (dan apakah sudah diubah sejak dipilih)."""
     s = load_settings()
-    tmp = os.path.join(DATA, "style_ref", uuid.uuid4().hex[:8])
+    src = _preview_source()
+    mine = [{**x, "thumb": thumb_key(x["style"], src)} for x in load_styles()]
+    presets = [{**x, "thumb": thumb_key(x["style"], src)} for x in PRESETS]
+    active = find_style(s.get("active_style_id"))
+    modified = bool(active) and look_of(s["style"]) != look_of(active["style"])
+    return jsonify(styles=mine, presets=presets, active_id=active["id"] if active else "",
+                   active_modified=modified, current_thumb=thumb_key(s["style"], src))
+
+
+@bp.get("/styles/<sid>/thumb")
+def style_thumb(sid):
+    """Gambar contoh kecil sebuah gaya ("current" = gaya aktif). Disimpan di data/clip/thumbs."""
+    if sid == "current":
+        style = load_settings()["style"]
+    else:
+        st = find_style(sid) or abort(404)
+        style = st["style"]
+    key = thumb_key(style)
+    path = os.path.join(THUMBS, key + ".jpg")
+    if not os.path.exists(path):
+        try:
+            jpg = preview_jpeg({**DEFAULT_STYLE, **style}, width=THUMB_W)
+        except Exception as e:
+            traceback.print_exc()
+            return jsonify(error=f"Gambar gaya gagal dibuat: {e}"[:300]), 500
+        os.makedirs(THUMBS, exist_ok=True)
+        files = sorted((e for e in os.scandir(THUMBS) if e.name.endswith(".jpg")), key=lambda e: e.stat().st_mtime)
+        remove_files(*[e.path for e in files[:-300]])  # simpan paling banyak ~300 gambar
+        tmp = f"{path}.{uuid.uuid4().hex[:6]}.tmp"
+        with open(tmp, "wb") as f:
+            f.write(jpg)
+        try:
+            os.replace(tmp, path)
+        except OSError:  # gambar yang sama sedang ditulis/dikirim permintaan lain: kirim hasil buatan sendiri
+            remove_files(tmp)
+            return Response(jpg, mimetype="image/jpeg")
+    return send_from_directory(THUMBS, key + ".jpg", max_age=31536000 if request.args.get("k") == key else 0)
+
+
+@bp.post("/styles")
+def create_style():
+    """Simpan gaya aktif sekarang ke "Gaya saya"."""
+    body = request.get_json(silent=True) or {}
+    s = load_settings()
+    entry = add_style(body.get("name"), s["style"], source={"kind": "manual"})
+    common.update_settings({"active_style_id": entry["id"]}, ID)
+    return jsonify(ok=True, style=entry)
+
+
+@bp.post("/styles/<sid>")
+def update_style(sid):
+    """Ganti nama (name) dan/atau timpa isinya dengan gaya aktif sekarang (overwrite: true)."""
+    body = request.get_json(silent=True) or {}
+    with styles_lock:
+        items = load_styles()
+        x = next((i for i in items if i["id"] == sid), None) or abort(404)
+        if "name" in body:
+            x["name"] = clean_style_name(body["name"], x["name"])
+        if body.get("overwrite"):
+            x["style"] = look_of(load_settings()["style"])
+            x["updated"] = int(time.time())
+        save_styles(items)
+    return jsonify(ok=True, style=x)
+
+
+@bp.delete("/styles/<sid>")
+def delete_style(sid):
+    with styles_lock:
+        save_styles([x for x in load_styles() if x["id"] != sid])
+    with lock:
+        for p in projects.values():
+            if p.get("style_id") == sid:  # proyek kembali memakai gaya aktif
+                p["style_id"] = None
+                save_project(p)
+    if load_settings().get("active_style_id") == sid:
+        common.update_settings({"active_style_id": ""}, ID)
+    return jsonify(ok=True)
+
+
+@bp.post("/styles/<sid>/apply")
+def apply_style(sid):
+    """Jadikan gaya ini gaya aktif (watermark & perataan volume milik pengguna tidak berubah)."""
+    st = find_style(sid) or abort(404)
+    s = load_settings()
+    new = apply_look(s["style"], st["style"])
+    common.update_settings({"style": new, "active_style_id": st["id"]}, ID)
+    return jsonify(ok=True, style=new)
+
+
+@bp.post("/project/<pid>/style")
+def set_project_style(pid):
+    """Gaya khusus proyek ini (dari pustaka). Kosong = ikut gaya aktif."""
+    p = projects.get(pid) or abort(404)
+    sid = (request.get_json(silent=True) or {}).get("style_id") or None
+    if sid and not find_style(sid):
+        return jsonify(error="Gaya tidak ditemukan."), 404
+    with lock:
+        p["style_id"] = sid
+    save_project(p)
+    return jsonify(ok=True)
+
+
+# --------------------------------------------------------------------------
+# Baca gaya dari clip referensi (pengukuran piksel + AI lokal gratis), di latar belakang
+# --------------------------------------------------------------------------
+style_jobs: dict[str, dict] = {}
+_style_slot = threading.Semaphore(1)   # satu pembacaan dalam satu waktu (model AI memakai banyak memori)
+
+
+def _run_style_job(jid, url, path, title, use_ai, replace_id):
+    job = style_jobs[jid]
+    tmp = os.path.join(DATA, "style_ref", jid)
+
+    def alive():
+        if job["cancel"]:
+            raise Cancelled()
+
+    def stage(label, x):
+        alive()
+        job["stage"], job["progress"] = label, round(x, 3)
+
     try:
-        f = request.files.get("file")
-        if f:
-            os.makedirs(tmp, exist_ok=True)
-            path = os.path.join(tmp, "ref" + (os.path.splitext(f.filename or "")[1].lower() or ".mp4"))
-            f.save(path)
-            title = f.filename or "file"
-        else:
-            url = str((request.get_json(silent=True) or {}).get("url") or "").strip()
-            if not url.startswith("http"):
-                return jsonify(error="Tempel link clip referensi atau pilih file video."), 400
-            info = core.download_reference(url, tmp, s.get("cookies_browser") or None, video=True)
-            path, title = info["path"], info["title"]
-        res = core.analyze_reference_style(path)
-        return jsonify(ok=True, title=title, style=res["style"], notes=res["notes"], seconds=res["seconds"])
+        stage("Menunggu giliran...", 0.01)
+        with _style_slot:
+            s = load_settings()
+            if url:
+                stage("Mengunduh clip referensi...", 0.05)
+                info = core.download_reference(url, tmp, s.get("cookies_browser") or None, video=True)
+                path, title = info["path"], info["title"]
+            res = style_ai.analyze(path, ai_url=s.get("local_ai_url"), ai_model=s.get("local_ai_model"),
+                                   use_ai=use_ai and s.get("local_ai_on", True), stage=stage, alive=alive)
+        alive()
+        # gaya lengkap: yang terbaca menimpa gaya aktif sekarang, sisanya tetap
+        detected = res["style"]
+        full = look_of({**load_settings()["style"], **detected})
+        ai = res.get("ai") or {}
+        meta = {"source": {"kind": "referensi", "title": str(title or "")[:150], "url": url or ""},
+                "detected": sorted(detected), "sources": res["sources"], "summary": ai.get("summary", ""),
+                "ai_model": ai.get("model", ""), "notes": res["notes"]}
+        entry = None
+        if replace_id:
+            with styles_lock:
+                items = load_styles()
+                entry = next((x for x in items if x["id"] == replace_id), None)
+                if entry:
+                    entry.update(style=full, updated=int(time.time()), **meta)
+                    save_styles(items)
+        if not entry:
+            name = style_ai.style_name(ai.get("name", ""), full) if ai else ""
+            entry = add_style(name or str(title or "Gaya referensi")[:40], full, **meta)
+        job.update(status="selesai", progress=1, stage="Selesai",
+                   result={**res, "title": title, "style_id": entry["id"], "name": entry["name"],
+                           "style": full, "detected": sorted(detected)})
+    except Cancelled:
+        job.update(status="batal", stage="Dibatalkan")
     except Exception as e:
         traceback.print_exc()
         msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e)).replace("ERROR: ", "")
-        return jsonify(error=f"Gagal membaca clip referensi: {msg}"[:400]), 400
+        job.update(status="gagal", error=f"Gagal membaca clip referensi: {msg}"[:400])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         if os.path.exists(tmp):
             remove_later([tmp])
+
+
+@bp.post("/style-jobs")
+def start_style_job():
+    """Mulai membaca gaya dari link atau file clip referensi. Hasilnya otomatis masuk "Gaya saya".
+    Body: {url, use_ai, replace_id} atau multipart (file, use_ai)."""
+    jid = uuid.uuid4().hex[:10]
+    tmp = os.path.join(DATA, "style_ref", jid)
+    f = request.files.get("file")
+    body = request.form if f else (request.get_json(silent=True) or {})
+    use_ai = str(body.get("use_ai", "true")).lower() not in ("false", "0", "")
+    replace_id = body.get("replace_id") or None
+    url, path, title = None, None, None
+    if f:
+        os.makedirs(tmp, exist_ok=True)
+        path = os.path.join(tmp, "ref" + (os.path.splitext(f.filename or "")[1].lower() or ".mp4"))
+        f.save(path)
+        title = os.path.splitext(f.filename or "file")[0]
+    else:
+        url = str(body.get("url") or "").strip()
+        if not url.startswith("http"):
+            return jsonify(error="Tempel link clip referensi atau pilih file video."), 400
+    for old in sorted(style_jobs, key=lambda k: style_jobs[k]["created"])[:-20]:
+        if style_jobs[old]["status"] != "proses":
+            style_jobs.pop(old, None)
+    style_jobs[jid] = {"id": jid, "status": "proses", "stage": "Menunggu giliran...", "progress": 0,
+                       "error": "", "result": None, "cancel": False, "created": time.time(),
+                       "label": url or title}
+    threading.Thread(target=_run_style_job, args=(jid, url, path, title, use_ai, replace_id), daemon=True).start()
+    return jsonify(ok=True, id=jid)
+
+
+@bp.get("/style-jobs/<jid>")
+def get_style_job(jid):
+    job = style_jobs.get(jid) or abort(404)
+    return jsonify({k: v for k, v in job.items() if k != "cancel"})
+
+
+@bp.post("/style-jobs/<jid>/cancel")
+def cancel_style_job(jid):
+    job = style_jobs.get(jid) or abort(404)
+    job["cancel"] = True
+    return jsonify(ok=True)
+
+
+@bp.get("/fonts/<key>")
+def font_file(key):
+    """Berkas font subtitle, supaya pilihan font di halaman tampil dengan bentuk aslinya."""
+    if key not in core.CAPTION_FONTS:
+        abort(404)
+    file = core.CAPTION_FONTS[key][0]
+    win = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+    for d in (core.FONTS_DIR, win):
+        if os.path.isfile(os.path.join(d, file)):
+            return send_from_directory(d, file, mimetype="font/ttf", max_age=86400)
+    abort(404)
 
 
 @bp.get("/media/<pid>/<path:name>")

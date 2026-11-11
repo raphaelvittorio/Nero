@@ -20,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import { post } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+import { LocalAISection } from "./local-ai-section";
 import { useNero, type GlobalSettings } from "./store";
 
 /** "" (tidak memakai cookies) disimpan sebagai "none" karena Select butuh nilai tidak kosong. */
@@ -36,7 +37,7 @@ export function SettingsDialog() {
   const { settings, settingsOpen, setSettingsOpen } = useNero();
   return (
     <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-xl">
         {settings && settingsOpen && <SettingsForm settings={settings} />}
       </DialogContent>
     </Dialog>
@@ -44,12 +45,15 @@ export function SettingsDialog() {
 }
 
 function SettingsForm({ settings }: { settings: GlobalSettings }) {
-  const { setSettingsOpen, loadSettings } = useNero();
+  const { setSettingsOpen, loadSettings, loadLocalAI } = useNero();
   const [key, setKey] = useState("");
   const [model, setModel] = useState(settings.ai_model);
   const [cookie, setCookie] = useState(settings.cookies_browser || "none");
   const [autostart, setAutostart] = useState(settings.desktop?.autostart ?? false);
   const [making, setMaking] = useState(false);
+  const [aiUrl, setAiUrl] = useState(settings.local_ai_url);
+  const [aiModel, setAiModel] = useState(settings.local_ai_model || "auto");
+  const [aiOn, setAiOn] = useState(settings.local_ai_on);
 
   async function save() {
     try {
@@ -57,10 +61,14 @@ function SettingsForm({ settings }: { settings: GlobalSettings }) {
         api_key: key,
         ai_model: model.trim(),
         cookies_browser: cookie === "none" ? "" : cookie,
+        local_ai_url: aiUrl.trim(),
+        local_ai_model: aiModel === "auto" ? "" : aiModel,
+        local_ai_on: aiOn,
         ...(settings.desktop && autostart !== settings.desktop.autostart ? { autostart } : {}),
       });
       setSettingsOpen(false);
       await loadSettings();
+      loadLocalAI();
       toast.success("Pengaturan disimpan");
     } catch {}
   }
@@ -120,6 +128,14 @@ function SettingsForm({ settings }: { settings: GlobalSettings }) {
           </Label>
           <SimpleSelect value={cookie} onChange={setCookie} options={COOKIE_BROWSERS} aria-label="Cookies browser" />
         </div>
+        <LocalAISection
+          url={aiUrl}
+          setUrl={setAiUrl}
+          model={aiModel}
+          setModel={setAiModel}
+          on={aiOn}
+          setOn={setAiOn}
+        />
         {settings.desktop && (
           <div className={cn(field, "gap-3 border-t pt-4")}>
             <Label>Membuka Nero tanpa terminal</Label>

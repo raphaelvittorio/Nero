@@ -11,6 +11,7 @@ berisi pesan), lalu http://127.0.0.1:7860 terbuka di browser.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import webbrowser
@@ -18,6 +19,7 @@ from urllib.parse import urlsplit
 
 import common
 import desktop
+import local_ai
 from common import OUTPUT, WEB
 
 PORT = int(os.environ.get("PORT", 7860))
@@ -70,7 +72,8 @@ def get_settings():
     """Pengaturan umum yang dipakai semua fitur. API key tidak pernah dikirim ke halaman."""
     s = common.load_settings()
     return jsonify(has_key=bool(s["api_key"]), ai_model=s["ai_model"], cookies_browser=s["cookies_browser"],
-                   desktop=desktop.status())
+                   local_ai_url=s["local_ai_url"], local_ai_model=s["local_ai_model"],
+                   local_ai_on=bool(s["local_ai_on"]), desktop=desktop.status())
 
 
 @app.post("/api/settings")
@@ -82,9 +85,13 @@ def post_settings():
         patch["api_key"] = key.strip()
     if body.get("clear_key"):
         patch["api_key"] = ""
-    for k in ("ai_model", "cookies_browser"):
+    for k in ("ai_model", "cookies_browser", "local_ai_model"):
         if k in body:
             patch[k] = str(body[k] or "").strip()
+    if "local_ai_url" in body:
+        patch["local_ai_url"] = local_ai.clean_url(str(body["local_ai_url"] or ""))
+    if "local_ai_on" in body:
+        patch["local_ai_on"] = bool(body["local_ai_on"])
     if patch.get("ai_model") == "":
         patch.pop("ai_model")
     common.update_settings(patch)
@@ -93,6 +100,44 @@ def post_settings():
             desktop.set_autostart(bool(body["autostart"]))
         except Exception as e:
             return jsonify(error=f"Pengaturan disimpan, tetapi buka otomatis belum bisa diatur: {e}"), 500
+    return jsonify(ok=True)
+
+
+_pull: dict[str, local_ai.PullJob] = {}   # unduhan model AI lokal yang sedang/terakhir berjalan
+
+
+@app.get("/api/local-ai")
+def local_ai_info():
+    """Status AI lokal gratis (Ollama / LM Studio): berjalan atau tidak, model yang ada, unduhan model."""
+    s = common.load_settings()
+    st = local_ai.status(s["local_ai_url"])
+    job = _pull.get("job")
+    return jsonify(url=st["url"], on=bool(s["local_ai_on"]), model=s["local_ai_model"], status=st,
+                   chosen=local_ai.pick_model(st, s["local_ai_model"]) if st["ok"] else None,
+                   recommended=local_ai.RECOMMENDED, pull=job.as_dict() if job else None)
+
+
+@app.post("/api/local-ai/pull")
+def local_ai_pull():
+    """Unduh model ke Ollama (di latar belakang). Hanya satu unduhan dalam satu waktu."""
+    model = str((request.get_json(silent=True) or {}).get("model") or "").strip()
+    if not re.fullmatch(r"[\w.\-/:]{2,80}", model):
+        return jsonify(error="Nama model tidak valid."), 400
+    job = _pull.get("job")
+    if job and job.status == "proses":
+        return jsonify(error=f"Sedang mengunduh {job.model}. Tunggu sampai selesai."), 409
+    s = common.load_settings()
+    if local_ai.status(s["local_ai_url"])["kind"] != "ollama":
+        return jsonify(error="Unduh model dari Nero hanya untuk Ollama. Buka Ollama dulu (ollama.com)."), 400
+    _pull["job"] = local_ai.PullJob(s["local_ai_url"], model)
+    return jsonify(ok=True)
+
+
+@app.post("/api/local-ai/pull/cancel")
+def local_ai_pull_cancel():
+    job = _pull.get("job")
+    if job and job.status == "proses":
+        job.cancelled = True
     return jsonify(ok=True)
 
 

@@ -9,6 +9,11 @@ export interface GlobalSettings {
   has_key: boolean;
   ai_model: string;
   cookies_browser: string;
+  /** AI lokal gratis (Ollama / LM Studio) */
+  local_ai_url: string;
+  /** "" = pilih otomatis model yang bisa melihat gambar */
+  local_ai_model: string;
+  local_ai_on: boolean;
   /** Ikon Nero di Desktop & buka otomatis saat Windows menyala (null bila bukan Windows). */
   desktop: { shortcut: boolean; autostart: boolean } | null;
 }
@@ -20,9 +25,31 @@ export interface FeatureSummary {
   stats: { label: string; value: number }[];
 }
 
+/** Status AI lokal dari /api/local-ai. */
+export interface LocalAIInfo {
+  url: string;
+  on: boolean;
+  model: string;
+  /** model yang benar-benar dipakai (pilihan pengguna atau otomatis), null = belum ada */
+  chosen: string | null;
+  status: {
+    ok: boolean;
+    kind: "ollama" | "openai" | null;
+    models: { name: string; vision: boolean; size_gb: number }[];
+    error: string;
+  };
+  recommended: { name: string; label: string; size_gb: number }[];
+  pull: null | { model: string; status: "proses" | "selesai" | "gagal" | "batal"; progress: number; stage: string; error: string };
+}
+
+/** AI lokal siap membaca gambar? */
+export const localAIReady = (ai: LocalAIInfo | null) => Boolean(ai?.on && ai.status.ok && ai.chosen);
+
 interface NeroStore {
   settings: GlobalSettings | null;
   loadSettings: () => Promise<void>;
+  localAI: LocalAIInfo | null;
+  loadLocalAI: () => Promise<LocalAIInfo | null>;
   summaries: Record<string, FeatureSummary>;
   online: boolean;
   settingsOpen: boolean;
@@ -46,17 +73,42 @@ export function NeroProvider({ children }: { children: React.ReactNode }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shutdownOpen, setShutdownOpen] = useState(false);
 
+  const [localAI, setLocalAI] = useState<LocalAIInfo | null>(null);
+
   const loadSettings = useCallback(() => api<GlobalSettings>("/api/settings").then(setSettings), []);
+  const loadLocalAI = useCallback(async () => {
+    try {
+      const r = await fetch("/api/local-ai");
+      if (!r.ok) return null;
+      const info = (await r.json()) as LocalAIInfo;
+      setLocalAI(info);
+      return info;
+    } catch {
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
     let alive = true;
     api<GlobalSettings>("/api/settings")
       .then((s) => alive && setSettings(s))
       .catch(() => {});
+    fetch("/api/local-ai")
+      .then((r) => (r.ok ? (r.json() as Promise<LocalAIInfo>) : null))
+      .then((info) => alive && info && setLocalAI(info))
+      .catch(() => {});
     return () => {
       alive = false;
     };
   }, []);
+
+  // selama model AI diunduh, pantau terus progresnya
+  const pulling = localAI?.pull?.status === "proses";
+  useEffect(() => {
+    if (!pulling) return;
+    const t = window.setInterval(loadLocalAI, 1000);
+    return () => window.clearInterval(t);
+  }, [pulling, loadLocalAI]);
 
   // Ringkasan berkala: cepat saat ada tugas berjalan, lambat saat diam. Sekaligus tanda koneksi.
   useEffect(() => {
@@ -83,7 +135,18 @@ export function NeroProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <Ctx.Provider
-      value={{ settings, loadSettings, summaries, online, settingsOpen, setSettingsOpen, shutdownOpen, setShutdownOpen }}
+      value={{
+        settings,
+        loadSettings,
+        localAI,
+        loadLocalAI,
+        summaries,
+        online,
+        settingsOpen,
+        setSettingsOpen,
+        shutdownOpen,
+        setShutdownOpen,
+      }}
     >
       {children}
     </Ctx.Provider>

@@ -9,3 +9,6 @@ output/
 
 # dibuat otomatis oleh aplikasi (salinan ffmpeg)
 tools/
+
+# Nero kedua untuk uji coba tampilan (lihat .claude/launch.json: nero-uji)
+data-uji/

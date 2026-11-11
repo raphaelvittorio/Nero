@@ -12,10 +12,10 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { api } from "@/lib/api";
+import { api, post } from "@/lib/api";
 
 import { API, isBusy } from "./api";
-import type { AppState, Clip, Language, Project, Settings } from "./types";
+import type { AppState, Clip, Language, Project, Settings, Style } from "./types";
 
 export type PlayerState =
   | { mode: "preview"; src: string; start: number; end: number; title: string }
@@ -27,6 +27,8 @@ type ConfirmOptions = { title: string; description?: string; action?: string; de
 interface Store {
   settings: Settings | null;
   loadSettings: () => Promise<void>;
+  /** ubah sebagian gaya aktif: langsung tampil, lalu disimpan ke server */
+  patchStyle: (patch: Partial<Style>) => Promise<void>;
   state: AppState;
   refresh: () => void;
   project: (pid: string) => Project | undefined;
@@ -73,6 +75,18 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
   const loadSettings = useCallback(
     () => api<Settings>(`${API}/settings`).then(applySettings),
     [applySettings],
+  );
+
+  const patchStyle = useCallback(
+    async (patch: Partial<Style>) => {
+      setSettings((s) => (s ? { ...s, style: { ...s.style, ...patch } } : s));
+      try {
+        await post(`${API}/settings`, { style: patch });
+      } catch {
+        loadSettings().catch(() => {});
+      }
+    },
+    [loadSettings],
   );
 
   useEffect(() => {
@@ -130,6 +144,7 @@ export function ClipProvider({ children }: { children: React.ReactNode }) {
       value={{
         settings,
         loadSettings,
+        patchStyle,
         state,
         refresh,
         project,

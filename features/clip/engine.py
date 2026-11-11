@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import wave
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -870,28 +871,40 @@ def _load_font(size, path=None):
 
 
 FONTS_DIR = os.path.join(APP_DIR, "fonts")
-# nama -> (berkas di fonts/ atau di folder font Windows, ketebalan untuk font variabel)
+# nama -> (berkas di fonts/ atau di folder font Windows, nilai sumbu font variabel / nama variasinya)
 CAPTION_FONTS = {
     "impact": ("impact.ttf", None),
-    "montserrat": ("Montserrat[wght].ttf", 800),
+    "montserrat": ("Montserrat[wght].ttf", [800]),
     "anton": ("Anton-Regular.ttf", None),
     "bebas": ("BebasNeue-Regular.ttf", None),
     "poppins": ("Poppins-ExtraBold.ttf", None),
-    "arial": ("ariblk.ttf", None),  # Arial Black bawaan Windows
+    "arial": ("ariblk.ttf", None),            # Arial Black bawaan Windows
+    "segoe": ("seguibl.ttf", None),           # Segoe UI Black (Windows): bulat modern
+    "bahnschrift": ("bahnschrift.ttf", b"Bold Condensed"),  # Windows: ramping teknis
+    "verdana": ("verdanab.ttf", None),        # Windows: lebar, sangat mudah dibaca
+    "georgia": ("georgiab.ttf", None),        # Windows: berkait (serif), kesan elegan/berita
+    "comic": ("comicbd.ttf", None),           # Comic Sans Bold (Windows): santai, lucu
 }
 
 
 def _style_font(style: dict, size: int):
     """Font subtitle/judul sesuai pilihan gaya; bila berkasnya tidak ada, pakai font tebal bawaan."""
-    file, weight = CAPTION_FONTS.get(style.get("caption_font", "impact"), CAPTION_FONTS["impact"])
+    return _font_by_key(style.get("caption_font", "impact"), size)
+
+
+def _font_by_key(key: str, size: int):
+    file, var = CAPTION_FONTS.get(key, CAPTION_FONTS["impact"])
     dirs = [FONTS_DIR] + ([os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")] if os.name == "nt" else [])
     for d in dirs:
         path = os.path.join(d, file)
         if os.path.isfile(path):
             font = _load_font(size, path)
-            if weight:
+            if var:
                 try:
-                    font.set_variation_by_axes([weight])
+                    if isinstance(var, bytes):
+                        font.set_variation_by_name(var)
+                    else:
+                        font.set_variation_by_axes(var)
                 except Exception:
                     pass
             return font
@@ -929,11 +942,34 @@ def _blend(frame: np.ndarray, rgba: np.ndarray, x: int, y: int) -> None:
 CAPTION_COLORS = {
     "kuning": (255, 221, 0), "hijau": (57, 255, 20), "merah": (255, 59, 59),
     "biru": (0, 200, 255), "pink": (255, 80, 200), "putih": (255, 255, 255),
+    "oranye": (255, 140, 0), "ungu": (170, 90, 255), "toska": (0, 230, 190),
 }
+_STROKE = {1: (2, 22), 2: (4, 11), 3: (6, 7)}  # tingkat garis tepi -> (minimal px, ukuran font / angka ini)
+
+
+def _stroke_px(size: int, level) -> int:
+    """Tebal garis tepi huruf: 0 tanpa, 1 tipis, 2 sedang (bawaan), 3 tebal."""
+    level = int(level or 0)
+    if level <= 0:
+        return 0
+    lo, div = _STROKE[min(3, level)]
+    return max(lo, size // div)
+
+
+def _light(rgb) -> bool:
+    """Warna terang (mis. kuning, putih): tulisan di atasnya sebaiknya gelap."""
+    return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2] > 185
+
+
+def _resize_rgba(arr: np.ndarray, scale: float) -> np.ndarray:
+    import cv2
+    nh, nw = max(1, int(arr.shape[0] * scale)), max(1, int(arr.shape[1] * scale))
+    return cv2.resize(arr, (nw, nh), interpolation=cv2.INTER_LINEAR)
 
 
 class CaptionRenderer:
-    """Subtitle gaya TikTok: 2-3 kata per tampilan, kata yang sedang diucapkan disorot."""
+    """Subtitle gaya TikTok: 1-4 kata per tampilan. Kata yang sedang diucapkan disorot dengan warna,
+    kotak berwarna, atau gaya karaoke (kata yang sudah diucapkan tetap berwarna)."""
 
     def __init__(self, words, style):
         self.style = style
@@ -946,6 +982,11 @@ class CaptionRenderer:
         self.upper = style.get("caption_upper", True)
         self.y_ratio = float(style.get("caption_pos", 0.68))
         self.max_words = int(style.get("caption_words", 3))
+        self.mode = style.get("caption_highlight", "warna")   # warna | kotak | karaoke | tanpa
+        self.anim = style.get("caption_anim", "pop")          # pop | bounce | naik | tanpa
+        self.stroke = _stroke_px(self.font_size, style.get("caption_stroke", 2))
+        self.shadow = bool(style.get("caption_shadow", True))
+        self.box = bool(style.get("caption_box", False))      # kotak gelap transparan di belakang subtitle
         self.groups = self._group(words)
         self.cache = {}
 
@@ -980,7 +1021,7 @@ class CaptionRenderer:
         g = self.groups[gi]
         words = [(w["w"].upper() if self.upper else w["w"]).strip(",") for w in g]
         fonts = [self.font_big if w.get("x") else self.font for w in g]   # kata kunci sedikit lebih besar
-        stroke = max(4, self.font_size // 11)
+        stroke, size, mode = self.stroke, self.font_size, self.mode
         draw0 = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
         space = draw0.textlength(" ", font=self.font)
         widths = [draw0.textlength(t, font=f) for t, f in zip(words, fonts)]
@@ -998,22 +1039,40 @@ class CaptionRenderer:
         if cur:
             lines.append(cur)
         line_h = [int(max(fonts[i].size for i in line) * 1.18) for line in lines]
-        img = Image.new("RGBA", (OUT_W, sum(line_h) + stroke * 4), (0, 0, 0, 0))
+        line_w = [sum(widths[i] for i in line) + space * (len(line) - 1) for line in lines]
+        # kotak sorot kata: tulisan putih bergaris tepi tipis di kotak gelap, tulisan gelap tanpa garis tepi di
+        # kotak terang. Tepi kotak memperhitungkan garis tepi supaya kotaknya tetap terlihat jelas
+        box_sw = 0 if _light(self.hl) else max(2, size // 22)
+        kx, ky = int(size * 0.18) + box_sw, int(size * 0.12) + box_sw
+        bx, by = int(size * 0.32), int(size * 0.14)           # tepi kotak gelap di belakang subtitle
+        m = max(stroke * 2, kx + 4 if mode == "kotak" else 0, by + 4 if self.box else 0) + 8
+        img = Image.new("RGBA", (OUT_W, sum(line_h) + 2 * m), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
-        y = stroke * 2
-        for line, lh in zip(lines, line_h):
-            lw = sum(widths[i] for i in line) + space * (len(line) - 1)
+        if self.box:
+            w0 = max(line_w)
+            d.rounded_rectangle(((OUT_W - w0) / 2 - bx, m - by, (OUT_W + w0) / 2 + bx, m + sum(line_h) + by // 2),
+                                radius=int(size * 0.28), fill=(0, 0, 0, 165))
+        y = m
+        for line, lh, lw in zip(lines, line_h, line_w):
             x = (OUT_W - lw) / 2
             top = max(fonts[i].getmetrics()[0] for i in line)
             for i in line:
                 f = fonts[i]
                 dy = top - f.getmetrics()[0]  # garis dasar kata besar & kecil disamakan
-                color = self.hl if (i == active or g[i].get("x")) else self.base
-                # bayangan
-                d.text((x + 4, y + dy + 6), words[i], font=f, fill=(0, 0, 0, 140),
-                       stroke_width=stroke, stroke_fill=(0, 0, 0, 140))
+                spoken = i <= active if mode == "karaoke" else (i == active and mode == "warna")
+                color = self.hl if (spoken or g[i].get("x")) else self.base
+                sw = stroke
+                if mode == "kotak" and i == active:
+                    _, cap_top, _, base = d.textbbox((x, y + dy), "H", font=f)
+                    low = 0 if self.upper else int(f.size * 0.12)   # ruang untuk huruf g, p, y
+                    d.rounded_rectangle((x - kx, cap_top - ky, x + widths[i] + kx, base + ky + low),
+                                        radius=int(size * 0.2), fill=self.hl + (255,))
+                    color, sw = ((15, 15, 15), 0) if _light(self.hl) else ((255, 255, 255), box_sw)
+                if self.shadow and not (mode == "kotak" and i == active):
+                    d.text((x + max(3, size // 22), y + dy + max(4, size // 15)), words[i], font=f,
+                           fill=(0, 0, 0, 140), stroke_width=sw, stroke_fill=(0, 0, 0, 140))
                 d.text((x, y + dy), words[i], font=f, fill=color + (255,),
-                       stroke_width=stroke, stroke_fill=(0, 0, 0, 255))
+                       stroke_width=sw, stroke_fill=(0, 0, 0, 255))
                 x += widths[i] + space
             y += lh
         arr = np.array(img)
@@ -1028,14 +1087,19 @@ class CaptionRenderer:
                     if w["s"] <= t:
                         active = i
                 arr = self._render(gi, active)
-                # efek "pop" kecil saat kelompok kata baru muncul
-                age = t - g[0]["s"]
-                if age < 0.08:
-                    import cv2
-                    sc = 0.88 + age / 0.08 * 0.12
-                    nh, nw = int(arr.shape[0] * sc), int(arr.shape[1] * sc)
-                    arr = cv2.resize(arr, (nw, nh), interpolation=cv2.INTER_LINEAR)
-                y = int(OUT_H * self.y_ratio - arr.shape[0] / 2)
+                # animasi saat kelompok kata baru muncul
+                age, dy = t - g[0]["s"], 0
+                if self.anim == "pop" and age < 0.08:
+                    arr = _resize_rgba(arr, 0.88 + age / 0.08 * 0.12)
+                elif self.anim == "bounce" and age < 0.2:      # membesar melewati ukuran asli lalu kembali
+                    k = age / 0.2
+                    arr = _resize_rgba(arr, 0.6 + 0.52 * k / 0.55 if k < 0.55 else 1.12 - 0.12 * (k - 0.55) / 0.45)
+                elif self.anim == "naik" and age < 0.15:       # naik dari bawah sambil muncul perlahan
+                    k = age / 0.15
+                    dy = int((1 - k) * 0.45 * self.font_size)
+                    arr = arr.copy()
+                    arr[..., 3] = (arr[..., 3] * k).astype(np.uint8)
+                y = int(OUT_H * self.y_ratio - arr.shape[0] / 2) + dy
                 _blend(frame, arr, (OUT_W - arr.shape[1]) // 2, y)
                 return
 
@@ -1059,14 +1123,25 @@ def _title_image(title: str, style) -> np.ndarray:
         lines.append(cur)
     lines = lines[:3]
     lh = int(size * 1.22)
+    bg = style.get("title_bg", "putih")
+    if bg == "tanpa":  # tulisan putih bergaris tepi hitam tanpa kotak
+        stroke = max(3, size // 10)
+        tw = int(max(d0.textlength(l, font=font) for l in lines)) if lines else 0
+        img = Image.new("RGBA", (tw + stroke * 4 + 16, lh * len(lines) + stroke * 4 + 16), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        y = stroke * 2 + 4
+        for l in lines:
+            x = (img.width - d.textlength(l, font=font)) / 2
+            d.text((x + 4, y + 6), l, font=font, fill=(0, 0, 0, 130), stroke_width=stroke, stroke_fill=(0, 0, 0, 130))
+            d.text((x, y), l, font=font, fill=(255, 255, 255, 255), stroke_width=stroke, stroke_fill=(0, 0, 0, 255))
+            y += lh
+        return np.array(img)
     pad_x, pad_y = 40, 26
     tw = int(max(d0.textlength(l, font=font) for l in lines)) if lines else 0
     bw, bh = tw + pad_x * 2, lh * len(lines) + pad_y * 2
     img = Image.new("RGBA", (bw + 16, bh + 16), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    bg = style.get("title_bg", "putih")
-    fill, txt = ((255, 255, 255, 250), (10, 10, 10)) if bg == "putih" else \
-                ((255, 221, 0, 250), (10, 10, 10)) if bg == "kuning" else ((0, 0, 0, 215), (255, 255, 255))
+    fill, txt = TITLE_BOXES.get(bg, TITLE_BOXES["putih"])
     d.rounded_rectangle((8 + 6, 8 + 8, 8 + bw + 6, 8 + bh + 8), radius=28, fill=(0, 0, 0, 90))
     d.rounded_rectangle((8, 8, 8 + bw, 8 + bh), radius=28, fill=fill)
     y = 8 + pad_y
@@ -1075,6 +1150,15 @@ def _title_image(title: str, style) -> np.ndarray:
         d.text((8 + (bw - lw) / 2, y), l, font=font, fill=txt)
         y += lh
     return np.array(img)
+
+
+# gaya judul -> (warna kotak RGBA, warna tulisan)
+TITLE_BOXES = {
+    "putih": ((255, 255, 255, 250), (10, 10, 10)),
+    "kuning": ((255, 221, 0, 250), (10, 10, 10)),
+    "hitam": ((0, 0, 0, 215), (255, 255, 255)),
+    "merah": ((232, 40, 40, 248), (255, 255, 255)),
+}
 
 
 def _handle_image(text: str) -> np.ndarray:
@@ -1236,9 +1320,91 @@ def _plan_layout(src, start, dur, info, style, sw, sh, n_frames, fps):
     return ("center" if layout == "face" else "blur"), None, None
 
 
+ZOOM_PUNCH = 1.14   # perbesaran "Zoom hentak"
+
+
+def _zoom(img: np.ndarray, z: float, cx: float = 0.5, cy: float = 0.42) -> np.ndarray:
+    """Perbesar bagian tengah frame (sedikit di atas tengah, tempat wajah biasanya berada)."""
+    import cv2
+    H, W = img.shape[:2]
+    w, h = int(round(W / z)), int(round(H / z))
+    x0 = int(np.clip(cx * W - w / 2, 0, W - w))
+    y0 = int(np.clip(cy * H - h / 2, 0, H - h))
+    return cv2.resize(img[y0:y0 + h, x0:x0 + w], (W, H), interpolation=cv2.INTER_LINEAR)
+
+
+def _zoom_plan(mode: str, words: list[dict], dur: float):
+    """Fungsi waktu (detik video hasil) -> perbesaran, atau None bila tanpa zoom.
+    halus : maju-mundur pelan (seperti kamera bernapas), siklus 8 detik
+    hentak: berganti dekat/jauh di akhir kalimat atau jeda, seperti jump cut (paling cepat tiap 2,5 detik)"""
+    import bisect
+    if mode == "halus":
+        return lambda t: 1.0 + 0.07 * (0.5 - 0.5 * math.cos(2 * math.pi * t / 8.0))
+    if mode != "hentak":
+        return None
+    switches, last = [], 0.0
+    for a, b in zip(words, words[1:]):
+        t = b["start"]
+        boundary = a["word"].rstrip().endswith((".", "!", "?", ",")) or t - a["end"] > 0.3
+        if (t - last >= 2.5 and boundary) or t - last >= 6.0:
+            switches.append(t)
+            last = t
+    if not words:
+        switches = [float(x) for x in np.arange(4.0, max(4.0, dur), 4.0)]
+    return lambda t: ZOOM_PUNCH if bisect.bisect_right(switches, t) % 2 else 1.0
+
+
+FILTERS = ("asli", "cerah", "hangat", "dingin", "hitamputih", "sinematik", "pudar")
+
+
+def _grade_fn(name: str | None):
+    """Filter warna untuk lapisan video (judul & subtitle tidak ikut berubah). None = warna asli."""
+    import cv2
+    if not name or name == "asli" or name not in FILTERS:
+        return None
+    x = np.arange(256, dtype=np.float32)
+    lo, hi = 1 - x / 255, x / 255                    # bobot bayangan & bagian terang
+    sat, vignette = 1.0, False
+    if name == "cerah":
+        b = g = r = (x - 128) * 1.1 + 128
+        sat = 1.3
+    elif name == "hangat":
+        r, g, b = x * 0.96 + 16, x * 0.99 + 4, x * 0.9
+        sat = 1.06
+    elif name == "dingin":
+        r, g, b = x * 0.92, x * 0.98 + 3, x * 0.95 + 18
+    elif name == "hitamputih":
+        b = g = r = (x - 128) * 1.12 + 128
+        sat = 0.0
+    elif name == "sinematik":                          # bayangan kehijauan-biru, bagian terang oranye
+        s = 128 + (x - 128) * 1.15
+        r, g, b = s - 10 * lo + 12 * hi, s + 3 * lo, s + 14 * lo - 10 * hi
+        sat, vignette = 0.9, True
+    else:  # pudar: hitam diangkat, warna lembut (kesan film lama)
+        b = g = r = 28 + x * 0.8
+        r, b = r + 6, b - 4
+        sat = 0.75
+    lut = np.clip(np.stack([b, g, r], axis=1), 0, 255).astype(np.uint8).reshape(256, 1, 3)
+    mask = None
+    if vignette:
+        yy, xx = np.mgrid[0:OUT_H, 0:OUT_W].astype(np.float32)
+        d = ((xx - OUT_W / 2) / (OUT_W * 0.75)) ** 2 + ((yy - OUT_H / 2) / (OUT_H * 0.7)) ** 2
+        mask = np.repeat((np.clip(1 - 0.45 * d, 0.55, 1) * 255).astype(np.uint8)[..., None], 3, axis=2)
+
+    def grade(img):
+        out = cv2.LUT(img, lut)
+        if sat != 1.0:
+            gray = cv2.cvtColor(cv2.cvtColor(out, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+            out = gray if sat == 0 else cv2.addWeighted(out, sat, gray, 1 - sat, 0)
+        if mask is not None and out.shape == mask.shape:
+            out = cv2.multiply(out, mask, scale=1 / 255)
+        return out
+    return grade
+
+
 class FrameComposer:
-    """Menyusun satu frame 1080x1920: tata letak + judul + subtitle + watermark + progress bar.
-    Dipakai oleh render penuh maupun pratinjau gaya, jadi hasil keduanya selalu sama."""
+    """Menyusun satu frame 1080x1920: tata letak + efek (zoom, filter) + judul + subtitle + watermark
+    + progress bar. Dipakai oleh render penuh maupun pratinjau gaya, jadi hasil keduanya selalu sama."""
 
     def __init__(self, sw, sh, layout, cam, split, style, words, title, n_frames):
         self.sw, self.sh, self.layout, self.cam, self.split = sw, sh, layout, cam, split
@@ -1249,17 +1415,25 @@ class FrameComposer:
         self.cap = CaptionRenderer(words, cap_style) if style.get("captions", True) and words else None
         self.title_img = _title_image(title, style) if style.get("title_on", True) and title.strip() else None
         self.title_secs = float(style.get("title_secs", 0) or 0)  # 0 = sepanjang video
+        self.title_y = int(OUT_H * float(style.get("title_pos", 0.11)))
         handle = (style.get("handle") or "").strip()
         self.handle_img = _handle_image(handle) if handle else None
+        self.handle_y = int(OUT_H * (0.035 if style.get("handle_pos") == "atas" else 0.84))
         self.bar_on = style.get("progress_bar", True)
+        self.bar_top = style.get("progress_pos") == "atas"
         self.bar_color = CAPTION_COLORS.get(style.get("caption_color", "kuning"), (255, 221, 0))[::-1]
+        # zoom tidak dipakai pada tata letak dua orang (garis tengahnya ikut bergeser)
+        self.zoom_mode = style.get("zoom", "tanpa") if layout != "split" else "tanpa"
+        self.zoom = _zoom_plan(self.zoom_mode, words or [], self.n_frames / OUT_FPS)
+        self.grade = _grade_fn(style.get("filter"))
         self.crop_w = min(sw, int(sh * 9 / 16))
         self.fg_h = int(OUT_W * sh / sw)
         self.half = OUT_H // 2
         self.split_cw = int(min(sw * 0.5, sh * OUT_W / self.half))
         self.split_ch = int(self.split_cw * self.half / OUT_W)
 
-    def frame(self, f, i, t=None):
+    def frame(self, f, i, t=None, zoom=None):
+        """zoom: perbesaran paksa (dipakai pratinjau supaya efek zoom terlihat di satu frame)."""
         import cv2
         t = i / OUT_FPS if t is None else t
         sw, sh = self.sw, self.sh
@@ -1283,23 +1457,34 @@ class FrameComposer:
                 out[k * self.half:(k + 1) * self.half] = cv2.resize(
                     part, (OUT_W, self.half), interpolation=cv2.INTER_LINEAR)
             out[self.half - 3:self.half + 3] = 0  # garis pemisah
-        else:  # blur: video utuh di tengah, latar belakang buram
-            # digelapkan saat masih kecil (135x240), jauh lebih cepat daripada di ukuran penuh
-            small = cv2.resize(f, (OUT_W // 8, OUT_H // 8), interpolation=cv2.INTER_AREA)
-            small = cv2.convertScaleAbs(cv2.GaussianBlur(small, (0, 0), 6), alpha=0.55)
-            out = cv2.resize(small, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
+        else:  # blur / hitam: video utuh di tengah, latar belakang buram atau hitam
+            if self.layout == "hitam":
+                out = np.zeros((OUT_H, OUT_W, 3), np.uint8)
+            else:
+                # digelapkan saat masih kecil (135x240), jauh lebih cepat daripada di ukuran penuh
+                small = cv2.resize(f, (OUT_W // 8, OUT_H // 8), interpolation=cv2.INTER_AREA)
+                small = cv2.convertScaleAbs(cv2.GaussianBlur(small, (0, 0), 6), alpha=0.55)
+                out = cv2.resize(small, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
             y0 = (OUT_H - self.fg_h) // 2
             out[y0:y0 + self.fg_h] = cv2.resize(f, (OUT_W, self.fg_h), interpolation=cv2.INTER_AREA)
 
+        z = zoom if zoom is not None else (self.zoom(t) if self.zoom else 1.0)
+        if z > 1.001 and self.layout != "split":
+            out = _zoom(out, z)
+        if self.grade is not None:
+            out = self.grade(out)
         if self.title_img is not None and (self.title_secs <= 0 or t < self.title_secs):
-            _blend(out, self.title_img, (OUT_W - self.title_img.shape[1]) // 2, int(OUT_H * 0.11))
+            _blend(out, self.title_img, (OUT_W - self.title_img.shape[1]) // 2, self.title_y)
         if self.handle_img is not None:
-            _blend(out, self.handle_img, (OUT_W - self.handle_img.shape[1]) // 2, int(OUT_H * 0.84))
+            _blend(out, self.handle_img, (OUT_W - self.handle_img.shape[1]) // 2, self.handle_y)
         if self.cap:
             self.cap.draw(out, t)
         if self.bar_on:
             bw = int(OUT_W * min(1.0, (i + 1) / self.n_frames))
-            out[OUT_H - 14:OUT_H, :bw] = self.bar_color
+            if self.bar_top:
+                out[:14, :bw] = self.bar_color
+            else:
+                out[OUT_H - 14:OUT_H, :bw] = self.bar_color
         return out
 
 
@@ -1489,22 +1674,48 @@ SAMPLE_WORDS = [{"start": 0.0, "end": 0.4, "word": "Contoh"}, {"start": 0.4, "en
                 {"start": 0.8, "end": 1.2, "word": "keren"}]
 
 
-def render_preview(src: str | None, t: float, words: list[dict], style: dict, title: str = "") -> bytes:
-    """Satu frame contoh (JPEG 540x960) dengan gaya saat ini, tanpa merender video."""
+_PREVIEW_CACHE: dict[tuple, tuple] = {}   # frame & tata letak pratinjau terakhir (kunci: video, waktu, tata letak)
+_PREVIEW_LOCK = threading.Lock()
+
+
+def _preview_source(src: str, t: float, style: dict):
+    """Frame video pada detik t + rencana tata letaknya. Disimpan sementara, karena kartu gaya di halaman
+    meminta banyak pratinjau dari frame yang sama (hanya gayanya yang berbeda)."""
+    try:
+        mtime = os.path.getmtime(src)
+    except OSError:
+        mtime = 0
+    key = (src, mtime, round(t, 2), style.get("layout", "auto"))
+    with _PREVIEW_LOCK:
+        hit = _PREVIEW_CACHE.get(key)
+    if hit:
+        return hit
+    info = probe(src)
+    t = max(0.0, min(t, max(0.0, info.duration - 0.5)))
+    sw, sh = _decode_size(info)
+    r = subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", src,
+                        "-frames:v", "1", "-vf", f"scale={sw}:{sh}", "-f", "rawvideo",
+                        "-pix_fmt", "bgr24", "-"],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_popen_kwargs())
+    if len(r.stdout) < sw * sh * 3:
+        raise RuntimeError("Tidak bisa mengambil frame dari video.")
+    f = np.frombuffer(r.stdout[:sw * sh * 3], np.uint8).reshape(sh, sw, 3)
+    win = min(4.0, max(0.5, info.duration - t))
+    layout, cam, split = _plan_layout(src, t, win, info, style, sw, sh, 1, OUT_FPS)
+    val = (f, sw, sh, layout, cam, split)
+    with _PREVIEW_LOCK:
+        if len(_PREVIEW_CACHE) >= 8:
+            _PREVIEW_CACHE.pop(next(iter(_PREVIEW_CACHE)))
+        _PREVIEW_CACHE[key] = val
+    return val
+
+
+def render_preview(src: str | None, t: float, words: list[dict], style: dict, title: str = "",
+                   width: int = OUT_W // 2) -> bytes:
+    """Satu frame contoh (JPEG 9:16, lebar `width`) dengan gaya ini, tanpa merender video."""
     import cv2
     if src:
-        info = probe(src)
-        t = max(0.0, min(t, max(0.0, info.duration - 0.5)))
-        sw, sh = _decode_size(info)
-        r = subprocess.run([ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", src,
-                            "-frames:v", "1", "-vf", f"scale={sw}:{sh}", "-f", "rawvideo",
-                            "-pix_fmt", "bgr24", "-"],
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_popen_kwargs())
-        if len(r.stdout) < sw * sh * 3:
-            raise RuntimeError("Tidak bisa mengambil frame dari video.")
-        f = np.frombuffer(r.stdout[:sw * sh * 3], np.uint8).reshape(sh, sw, 3)
-        win = min(4.0, max(0.5, info.duration - t))
-        layout, cam, split = _plan_layout(src, t, win, info, style, sw, sh, 1, OUT_FPS)
+        f, sw, sh, layout, cam, split = _preview_source(src, t, style)
     else:  # belum ada video: latar gradasi
         sw, sh = 1920, 1080
         gx = np.linspace(0, 1, sw, dtype=np.float32)[None, :, None]
@@ -1516,8 +1727,11 @@ def render_preview(src: str | None, t: float, words: list[dict], style: dict, ti
         layout, cam, split = ("blur" if lay in ("auto", "face", "split") else lay), None, None
     rel = [{"start": w["start"] - t, "end": w["end"] - t, "word": w["word"]} for w in words] or SAMPLE_WORDS
     tt = (rel[1] if len(rel) > 1 else rel[0])["start"] + 0.1  # kata ke-2 sedang disorot
-    out = FrameComposer(sw, sh, layout, cam, split, style, rel, title, 100).frame(f, 34, t=tt)
-    small = cv2.resize(out, (OUT_W // 2, OUT_H // 2), interpolation=cv2.INTER_AREA)
+    comp = FrameComposer(sw, sh, layout, cam, split, style, rel, title, 100)
+    # efek zoom ditampilkan pada keadaan "dekat" supaya terlihat bedanya
+    z = {"hentak": ZOOM_PUNCH, "halus": 1.05}.get(comp.zoom_mode)
+    out = comp.frame(f, 34, t=tt, zoom=z)
+    small = cv2.resize(out, (width, int(width * OUT_H / OUT_W)), interpolation=cv2.INTER_AREA)
     ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 88])
     if not ok:
         raise RuntimeError("Gagal membuat gambar pratinjau.")
@@ -1609,7 +1823,8 @@ def write_srt(words, start, end, path, per_line=6):
 # --------------------------------------------------------------------------
 # 6. Tiru gaya dari clip referensi (tanpa AI): baca frame-nya, tebak pengaturan gaya
 # --------------------------------------------------------------------------
-_HUE_NAMES = (("merah", 0), ("kuning", 52), ("hijau", 115), ("biru", 195), ("pink", 318), ("merah", 360))
+_HUE_NAMES = (("merah", 0), ("oranye", 33), ("kuning", 52), ("hijau", 112), ("toska", 168), ("biru", 195),
+              ("ungu", 268), ("pink", 318), ("merah", 360))
 # dikalibrasi dengan clip hasil Clip Maker sendiri (gaya diketahui)
 _LINE_TO_FONT = 0.78      # tinggi huruf kapital terdeteksi ≈ 0,78 × ukuran font (untuk Impact; font lain ±15%)
 _POS_OFFSET = 0.0         # selisih pusat teks terdeteksi terhadap caption_pos (porsi tinggi layar)
@@ -1723,6 +1938,7 @@ def analyze_reference_style(path: str, fps: float = 3.0, secs: float = 40.0) -> 
     ink = M.mean(axis=2)                      # (T, H): porsi piksel teks per baris
     on = ink > 0.03
     style, notes, dbg = {}, [], {}
+    extra = {"caption_band": None, "caption_times": [], "title_band": None}   # untuk pembacaan lanjutan oleh AI
     excluded = np.zeros(H, bool)              # baris berisi teks, diabaikan saat menilai tata letak
 
     # ---- judul: teks diam di bagian atas pada detik-detik awal
@@ -1736,6 +1952,7 @@ def analyze_reference_style(path: str, fps: float = 3.0, secs: float = 40.0) -> 
     if title:
         ta, tb = title
         excluded[ta:tb] = True
+        extra["title_band"] = (ta / H, tb / H)
         shown = on[:, ta:tb].mean(axis=1) > 0.35
         gone = next((t for t in range(w0, T - 1) if not shown[t] and not shown[t + 1]), None)
         if gone is None:
@@ -1852,6 +2069,8 @@ def analyze_reference_style(path: str, fps: float = 3.0, secs: float = 40.0) -> 
                 counts.append(nw)
                 centers.append(a + (used[0][0] + used[-1][1]) / 2)
         if counts:
+            extra["caption_band"] = (a / H, b / H)
+            extra["caption_times"] = [round(t / fps, 2) for t, _, _ in found]
             # tinggi kapital: kata ber-huruf tinggi (bukan kata huruf kecil saja); kata kunci yang dibesarkan sedikit
             cap = float(np.percentile(word_h, 80))
             # huruf kecil: kebanyakan kolom huruf hanya setinggi huruf 'x'; HURUF BESAR: setinggi kapital
@@ -1889,6 +2108,10 @@ def analyze_reference_style(path: str, fps: float = 3.0, secs: float = 40.0) -> 
                     style["caption_base"] = ranked[0][0]
                     if len(ranked) > 1 and ranked[1][1] >= 0.15 * len(vivid):
                         style["caption_color"] = ranked[1][0]
+            box = _highlight_box(frames, [t for t, _, _ in found], a, b, med)
+            dbg["box"] = box
+            if box:
+                style["caption_highlight"], style["caption_color"] = "kotak", box
             if presence[a:b].max() < 0.35:
                 notes.append("Subtitle hanya sesekali terlihat, hasil subtitle mungkin kurang tepat.")
     else:
@@ -1907,8 +2130,14 @@ def analyze_reference_style(path: str, fps: float = 3.0, secs: float = 40.0) -> 
 
     # ---- tata letak
     gray = frames.mean(axis=3, dtype=np.float32)
-    mid = gray[:, H // 2 - 3: H // 2 + 3]
-    divider = float(((mid.mean(axis=2) < 45) & (mid.std(axis=2) < 20)).any(axis=1).mean())
+    # garis pemisah dua orang: baris gelap rata di tengah yang jelas lebih gelap dari sekitarnya
+    # (pada video yang memang gelap, baris tengah yang gelap saja bukan tanda pemisah)
+    row_mean, row_std = gray.mean(axis=2), gray.std(axis=2)
+    hit = np.zeros(T, bool)
+    for y in range(H // 2 - 3, H // 2 + 3):
+        near = np.maximum(row_mean[:, max(0, y - 6)], row_mean[:, min(H - 1, y + 6)])
+        hit |= (row_mean[:, y] < 45) & (row_std[:, y] < 20) & (near > row_mean[:, y] + 25)
+    divider = float(hit.mean())
     both, single = 0, 0
     samples = np.linspace(0, T - 1, min(10, T)).astype(int)
     try:
@@ -1950,11 +2179,171 @@ def analyze_reference_style(path: str, fps: float = 3.0, secs: float = 40.0) -> 
     if divider >= 0.6 or both >= max(2, 0.5 * len(samples)):
         style["layout"] = "split"
     elif blur:
-        style["layout"] = "blur"
+        y1, y2 = blur
+        rows = np.r_[0:max(1, y1 - 2), min(H - 1, y2 + 3):H]
+        rows = rows[keep[rows]] if keep[rows].any() else rows
+        # latar hitam polos (bukan blur): hampir semua piksel di luar video sangat gelap
+        dark = float(np.median(gray[samples][:, rows]))
+        dbg["layout"]["outside"] = round(dark, 1)
+        style["layout"] = "hitam" if dark < 16 else "blur"
     elif single >= 0.4 * len(samples):
         style["layout"] = "face"
     else:
         style["layout"] = "center"
 
-    notes.append("Yang tidak bisa ditiru: jenis font, animasi teks, zoom, musik, b-roll, dan watermark.")
-    return {"style": style, "notes": notes, "seconds": round(T / fps, 1), "debug": dbg}
+    # ---- warna: video hitam-putih terbaca pasti; warna lain hanya dicatat (dinilai AI bila ada)
+    rows = np.flatnonzero(keep[: H - 6])
+    hsv = np.stack([cv2.cvtColor(frames[t], cv2.COLOR_BGR2HSV) for t in samples])[:, rows]
+    bgr = frames[samples][:, rows].astype(np.float32)
+    color = {"sat": round(float(hsv[..., 1].mean()), 1),
+             "warm": round(float((bgr[..., 2] - bgr[..., 0]).mean()), 1),
+             "bright": round(float(hsv[..., 2].mean()), 1)}
+    dbg["color"] = color
+    if color["sat"] < 14:
+        style["filter"] = "hitamputih"
+
+    # ---- zoom: perbesaran mendadak (jump cut) atau maju-mundur pelan
+    motion = _motion_stats(frames, keep, fps)
+    dbg["motion"] = motion
+    if motion["jumps_per_min"] >= 3:
+        style["zoom"] = "hentak"
+    elif motion["slow_zoom"]:
+        style["zoom"] = "halus"
+    elif motion["measured"]:
+        style["zoom"] = "tanpa"
+
+    notes.append("Musik, b-roll, stiker, dan emoji tidak ikut ditiru.")
+    return {"style": style, "notes": notes, "seconds": round(T / fps, 1), "debug": dbg,
+            "measure": {**extra, "color": color, "motion": motion}}
+
+
+def _highlight_box(frames, times, a, b, line_h) -> str | None:
+    """Kata yang disorot dengan kotak berwarna? Kotak = bidang warna mencolok seukuran kata dengan tepi atas &
+    bawah yang lurus penuh. Huruf berwarna biasa tidak begitu: di baris tepinya ada celah antarhuruf (garis tepi
+    hitam). Hasil: nama warna kotak, atau None."""
+    import cv2
+    if not times or line_h <= 0:
+        return None
+    hits, hues = 0, []
+    sample = times[::2] or times
+    for t in sample:
+        hsv = cv2.cvtColor(np.ascontiguousarray(frames[t, a:b]), cv2.COLOR_BGR2HSV)
+        viv = (hsv[..., 1] >= 110) & (hsv[..., 2] >= 110)
+        if not viv.any():
+            continue
+        # hanya warna yang paling banyak: bintik warna-warni video di sekitarnya tidak ikut menempel ke kotak
+        hue = hsv[..., 0].astype(int)
+        dom = int(np.argmax(np.bincount(hue[viv] // 6, minlength=31))) * 6 + 3
+        viv = (viv & (np.minimum(np.abs(hue - dom), 180 - np.abs(hue - dom)) <= 12)).astype(np.uint8)
+        white = (hsv[..., 1] <= 60) & (hsv[..., 2] >= 200)
+        n, lab, st, _ = cv2.connectedComponentsWithStats(viv, connectivity=8)
+        found = None
+        # 1) kotak utuh (warna terang dengan tulisan gelap, atau huruf kecil): tepi atas & bawah lurus penuh.
+        #    Lebarnya minimal 1,35 x tinggi supaya satu huruf tebal (mis. "E" berwarna) tidak dikira kotak
+        for k in range(1, n):
+            x, y, w, h, area = (int(v) for v in st[k])
+            # isi kotak berlubang karena tulisan di dalamnya, jadi batas isinya rendah; yang menentukan tepinya
+            if not (0.8 * line_h <= h <= 2.4 * line_h and w >= 1.35 * h and area >= 0.2 * w * h):
+                continue
+            inner = viv[y:y + h, x + int(0.15 * w): x + w - int(0.15 * w)]   # tanpa sudut membulat
+            band = max(1, int(0.18 * h))   # baris tepi terbaik di atas & bawah (tepi kotak hanya beberapa piksel)
+            top = max(inner[r].mean() for r in range(0, band))
+            bottom = max(inner[r].mean() for r in range(h - band, h))
+            if top >= 0.85 and bottom >= 0.85:
+                found = lab[y:y + h, x:x + w] == k, (y, x, h, w)
+                break
+        # 2) kotak warna gelap terpotong-potong oleh huruf putih bergaris tepi: gabungkan potongan yang
+        #    berdekatan, lalu periksa sisi kiri-kanan penuh dan ada tulisan putih di dalamnya
+        #    (kata berwarna biasa tidak pernah berisi huruf putih)
+        if found is None:
+            parts = sorted((int(st[k][0]), int(st[k][1]), int(st[k][2]), int(st[k][3])) for k in range(1, n)
+                           if st[k][3] >= 0.5 * line_h and st[k][4] >= 4)
+            groups, cur = [], []
+            for p in parts:
+                if cur and p[0] - max(q[0] + q[2] for q in cur) > 0.3 * line_h:
+                    groups.append(cur)
+                    cur = []
+                cur.append(p)
+            groups.append(cur)
+            for g in groups:
+                if len(g) < 2:
+                    continue
+                x0, y0 = min(p[0] for p in g), min(p[1] for p in g)
+                x1, y1 = max(p[0] + p[2] for p in g), max(p[1] + p[3] for p in g)
+                w, h = x1 - x0, y1 - y0
+                if not (0.8 * line_h <= h <= 2.4 * line_h and w >= 1.35 * h):
+                    continue
+                reg, mid = viv[y0:y1, x0:x1], slice(int(0.25 * h), max(int(0.25 * h) + 1, int(0.75 * h)))
+                side = max(1, int(0.06 * w))
+                ends = min(reg[int(0.2 * h):int(0.8 * h) or 1, :side].mean(), reg[int(0.2 * h):int(0.8 * h) or 1, -side:].mean())
+                if 0.25 <= reg.mean() <= 0.85 and white[y0:y1, x0:x1][mid].mean() >= 0.12 and ends >= 0.7:
+                    found = reg > 0, (y0, x0, h, w)
+                    break
+        if found is not None:
+            m, (y, x, h, w) = found
+            hits += 1
+            hues.append(hsv[y:y + h, x:x + w][m][:, 0])
+    if hits < max(2, 0.35 * len(sample)):
+        return None
+    ang = np.concatenate(hues).astype(np.float64) * (2 * np.pi / 180)   # rata-rata melingkar: merah ada di 0 & 180
+    deg = math.degrees(math.atan2(np.sin(ang).mean(), np.cos(ang).mean())) % 360
+    return _hue_name(deg)
+
+
+def _motion_stats(frames, keep_rows, fps) -> dict:
+    """Gerak kamera antar-frame (dibaca dengan titik fitur ORB, baris berisi teks diabaikan):
+    jumps_per_min  : perbesaran mendadak >= 6% (efek 'zoom hentak' / punch-in)
+    cuts_per_min   : pergantian adegan
+    slow_zoom      : perbesaran pelan yang konsisten (efek 'zoom halus')
+    measured       : cukup frame yang bisa dibaca untuk menyimpulkan 'tanpa zoom'"""
+    import cv2
+    T, H, W = frames.shape[:3]
+    out = {"jumps_per_min": 0.0, "cuts_per_min": 0.0, "slow_zoom": False, "measured": False}
+    if T < 6:
+        return out
+    mask = np.zeros((H, W), np.uint8)
+    mask[keep_rows] = 255
+    gray = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames]
+    orb = cv2.ORB_create(nfeatures=400, fastThreshold=12)
+    feats = [orb.detectAndCompute(g, mask) for g in gray]
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
+    def scale(a, b):
+        (ka, da), (kb, db) = feats[a], feats[b]
+        if da is None or db is None or len(ka) < 25 or len(kb) < 25:
+            return None
+        m = bf.match(da, db)
+        if len(m) < 20:
+            return None
+        pa = np.float32([ka[x.queryIdx].pt for x in m])
+        pb = np.float32([kb[x.trainIdx].pt for x in m])
+        M, inl = cv2.estimateAffinePartial2D(pa, pb, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+        if M is None or inl is None or int(inl.sum()) < max(15, 0.3 * len(m)):
+            return None
+        return float(np.hypot(M[0, 0], M[1, 0]))
+
+    rows = np.flatnonzero(keep_rows)
+    jumps = cuts = readable = 0
+    shot_start, drift = 0, []
+    for t in range(T - 1):
+        diff = float(cv2.absdiff(gray[t][rows], gray[t + 1][rows]).mean())
+        s = scale(t, t + 1)
+        if s is not None:
+            readable += 1
+        if diff > 8 and s is not None and abs(math.log(s)) > 0.06:
+            jumps += 1
+        elif diff > 14 and s is None:
+            cuts += 1
+            shot_start = t + 1
+        elif s is not None and t + 3 < T and t - shot_start >= 0:
+            s3 = scale(t, t + 3)   # 1 detik: zoom pelan baru terlihat setelah beberapa frame
+            if s3 is not None:
+                drift.append(math.log(s3))
+    minutes = max(1e-6, (T - 1) / fps / 60)
+    out["jumps_per_min"] = round(jumps / minutes, 1)
+    out["cuts_per_min"] = round(cuts / minutes, 1)
+    if len(drift) >= 6:
+        d = np.abs(np.array(drift))
+        out["slow_zoom"] = bool(np.median(d) > 0.012 and float(np.mean(d > 0.008)) > 0.6)
+    out["measured"] = readable >= 0.5 * (T - 1)
+    return out

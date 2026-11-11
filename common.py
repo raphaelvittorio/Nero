@@ -18,8 +18,9 @@ import time
 
 APP_NAME = "Nero"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA = os.path.join(APP_DIR, "data")
-OUTPUT = os.path.join(APP_DIR, "output")
+# NERO_DATA / NERO_OUTPUT hanya untuk pengembangan & uji coba: menjalankan Nero kedua dengan data terpisah
+DATA = os.path.abspath(os.environ.get("NERO_DATA") or os.path.join(APP_DIR, "data"))
+OUTPUT = os.path.abspath(os.environ.get("NERO_OUTPUT") or os.path.join(APP_DIR, "output"))
 WEB = os.path.join(APP_DIR, "web")  # tampilan siap pakai (hasil build frontend/)
 SETTINGS_PATH = os.path.join(DATA, "settings.json")
 os.makedirs(DATA, exist_ok=True)
@@ -47,6 +48,10 @@ GLOBAL_DEFAULTS = {
     "api_key": "",
     "ai_model": "claude-sonnet-5-5",
     "cookies_browser": "",
+    # AI lokal gratis (Ollama / LM Studio), lihat local_ai.py. Model kosong = pilih otomatis.
+    "local_ai_url": "http://127.0.0.1:11434",
+    "local_ai_model": "",
+    "local_ai_on": True,
 }
 _feature_defaults: dict[str, dict] = {}
 _settings_lock = threading.RLock()

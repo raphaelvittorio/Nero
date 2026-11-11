@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 import { API } from "./api";
 import { BriefField } from "./brief-field";
 import { LANGUAGES } from "./options";
+import { StyleSelect } from "./style-parts";
 import { useStore } from "./store";
 
 export function InputCard() {
@@ -32,6 +33,7 @@ export function InputCard() {
   const [over, setOver] = useState(false);
   const [uploading, setUploading] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [styleId, setStyleId] = useState<string | null>(null);
   const fileIn = useRef<HTMLInputElement>(null);
 
   async function submitLinks() {
@@ -41,7 +43,14 @@ export function InputCard() {
     }
     setSending(true);
     try {
-      const r = await post(`${API}/add`, { links, n_clips: nClips, auto_render: autoRender, language, brief });
+      const r = await post(`${API}/add`, {
+        links,
+        n_clips: nClips,
+        auto_render: autoRender,
+        language,
+        brief,
+        style_id: styleId,
+      });
       setLinks("");
       setBrief(""); // timeline riset berlaku untuk video yang barusan diproses
       toast.success(`${r.count} video masuk antrian`);
@@ -62,6 +71,7 @@ export function InputCard() {
         fd.append("auto_render", String(autoRender));
         fd.append("language", language);
         fd.append("brief", brief);
+        if (styleId) fd.append("style_id", styleId);
         setUploading(f.name);
         await post(`${API}/upload`, fd);
       }
@@ -147,9 +157,11 @@ export function InputCard() {
           </CollapsibleContent>
         </Collapsible>
 
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-3 pt-1">
-          <div className="flex items-center gap-2">
-            <Label htmlFor="nclips">Jumlah clip</Label>
+        <div className="grid grid-cols-[5rem_minmax(0,1fr)] gap-3 pt-1 sm:grid-cols-[5rem_10rem_minmax(0,1fr)]">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="nclips" className="text-xs font-normal text-muted-foreground">
+              Jumlah clip
+            </Label>
             <Input
               id="nclips"
               type="number"
@@ -157,25 +169,29 @@ export function InputCard() {
               max={20}
               value={nClips}
               onChange={(e) => setNClips(Number(e.target.value) || 1)}
-              className="w-16"
             />
           </div>
-          <div className="flex items-center gap-2">
-            <Label>Bahasa</Label>
+          <div className="flex flex-col gap-1.5">
+            <Label className="text-xs font-normal text-muted-foreground">Bahasa</Label>
             <SimpleSelect
               value={language}
               onChange={setLanguage}
               options={LANGUAGES}
-              className="w-auto min-w-36"
               aria-label="Bahasa yang diucapkan di video"
             />
           </div>
-          <Label className="cursor-pointer">
+          <div className="col-span-full flex min-w-0 flex-col gap-1.5 sm:col-span-1">
+            <Label className="text-xs font-normal text-muted-foreground">Gaya video ini</Label>
+            <StyleSelect value={styleId} onChange={setStyleId} aria-label="Gaya untuk video ini" />
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <Label className="cursor-pointer font-normal">
             <Checkbox checked={autoRender} onCheckedChange={(v) => setAutoRender(v === true)} />
-            Langsung render otomatis
+            Langsung render setelah momen ditemukan
           </Label>
           <div className="flex-1" />
-          <Button size="lg" className="px-4 font-bold" onClick={submitLinks} disabled={sending}>
+          <Button size="lg" className="px-5 font-bold" onClick={submitLinks} disabled={sending}>
             Proses <PlayIcon />
           </Button>
         </div>
